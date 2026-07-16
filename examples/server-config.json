@@ -1,0 +1,6 @@
+{
+  "mode": "server",
+  "bare_repo": "/home/git/vaults/Main.git",
+  "worktree": "/home/obsidian/vaults/Main",
+  "run_as_user": "obsidian"
+}
