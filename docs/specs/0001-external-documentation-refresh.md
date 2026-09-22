@@ -7,6 +7,21 @@
 
 This feature refreshes selected documentation from named external Git repositories into named paths in the vault during client sync. The manifest is tracked by the vault, while a small generated state file records the last projected commit and the paths each source owns. The first slice proves one safe client path and leaves server refresh, pinned revisions, and migration commands for later decisions.
 
+## Historical reconciliation
+
+This file remains the historical specification for the original external documentation projection feature. It records the decisions made in the first slice and is not rewritten to describe the later ownership design.
+
+[Spec 0002](0002-exclusive-ownership-projected-destinations.md) is the current authority for the areas listed below. The affected text in this file remains as historical v1 context, while the unaffected parts remain authoritative.
+
+The following decisions from this specification are superseded by spec 0002:
+
+1. **Destination ownership**: The root only `owned_paths` model and the related ownership checks in **AC-4**, **AC-5**, and **AC-7**, the data model, state transitions, and key invariants are superseded. Spec 0002 requires exclusive ownership of each configured destination subtree, a complete inventory of projected files and materialized directories, validation of the current filesystem and committed projection, and exact path replacement.
+2. **Generated state**: The version 1 generated state shape, including the rule that `owned_paths` contains only mapping destination roots, is historical. Spec 0002 changes the generated state to version 2 and defines its complete owned path inventory, valid tree rules, deterministic representation, and rejection of legacy version 1 state before source fetch.
+3. **Projection and stale content behavior**: The original replacement and pruning description, including the destination root assumptions in **AC-7** and the related build plan and test scenarios, is superseded. Spec 0002 governs stale owned path removal, file and directory type changes, missing source mapping roots, safe mutation ordering, and the distinct replacement, staging, and expected commit path sets.
+4. **Rollback details**: The original v1 rollback description in **AC-9**, the related key invariants, build plan, and consequences remain a historical record of the initial transaction design. Spec 0002 is current authority for restoring the validated prior inventory and projection, preserving unrelated vault work, and applying the existing manual recovery path when commit confirmation is uncertain. The shared outcome rules still apply: a confirmed refresh commit remains durable, uncertain commit results do not trigger history rewriting or compensating commits, and source fetch progress is not rolled back.
+
+Spec 0001 remains authoritative for the overall one way projection model, source repository authority, explicit source fetching and resolved commit tree reads, client sync integration and ordering, server mode exclusion, source worktree protection, lock behavior where unchanged, normal sync continuation and abort boundaries, and later normal sync behavior after a successful refresh. Spec 0002 explicitly preserves those boundaries.
+
 ## Context
 
 vaultctl manages a Git backed Obsidian vault. The existing client sync flow already checks repository state, uses explicit upstream configuration, and stops for conflicts or incomplete operations. Server mode deliberately does not run sync.
@@ -129,7 +144,7 @@ The runner up would provide broader coverage, but it would make the first verifi
    ```
 
    The top level requires integer `version` equal to `1` and a nonempty `sources` array. Each source requires string fields `id`, `repository`, `remote`, and `reference`, plus a nonempty `mappings` array. Each mapping requires string fields `source` and `destination`. The manifest accepts any member ordering, but rejects unknown fields, duplicate object member names, null or wrong typed values, missing fields, duplicate source identifiers, duplicate mappings, and trailing JSON values. `id` is a nonempty string without control characters and is unique by exact value. A reference is a branch name accepted by Git branch-name validation, not a commit identifier, tag, symbolic expression, or local branch lookup. Repository and source values use normalized relative path rules. Destination values use the destination path rules below. The manifest remains human authored, so its cosmetic member ordering is not prescribed.
-3. `.vaultctl/external-docs-state.json` is generated strict JSON with this exact shape:
+3. **Historical v1 generated state, superseded by spec 0002**: `.vaultctl/external-docs-state.json` is generated strict JSON with this exact shape:
 
    ```json
    {
@@ -146,11 +161,13 @@ The runner up would provide broader coverage, but it would make the first verifi
    }
    ```
 
-   The top level requires integer `version` equal to `1` and a nonempty `sources` array. Each entry requires string fields `id` and `resolved_commit`, plus a nonempty array `owned_paths` of strings. `resolved_commit` is the full object identifier of a Git object whose type is `commit`. `owned_paths` is the complete normalized, duplicate free set of mapping destination paths, not every projected file. State entries relate to manifest entries by identifier. Unknown fields, duplicate object member names, duplicate state identifiers, duplicate owned paths, missing or malformed fields, and trailing JSON values fail before projection. Generated state uses fixed member order, sources sorted by identifier, owned paths sorted by normalized path, two space indentation, and one trailing newline. The current owned path set must compare exactly with the previous set for an existing source.
+   The top level requires integer `version` equal to `1` and a nonempty `sources` array. Each entry requires string fields `id` and `resolved_commit`, plus a nonempty array `owned_paths` of strings. `resolved_commit` is the full object identifier of a Git object whose type is `commit`. `owned_paths` is the complete normalized, duplicate free set of mapping destination paths, not every projected file. State entries relate to manifest entries by identifier. Unknown fields, duplicate object member names, duplicate state identifiers, duplicate owned paths, missing or malformed fields, and trailing JSON values fail before projection. Generated state uses fixed member order, sources sorted by identifier, owned paths sorted by normalized path, two space indentation, and one trailing newline. The current owned path set must compare exactly with the previous set for an existing source. This paragraph is retained as the original v1 state contract; spec 0002 defines the current version 2 state contract.
 4. Source identifiers are unique in the manifest and state. State entries may be a subset of manifest sources before a first refresh for a newly added source, but cannot contain an unknown identifier. A source has many mappings. Each mapping owns one bounded destination path. Destination paths cannot overlap within or across sources, including case insensitive aliases.
 5. State entries may be added for new identifiers only when every new destination is absent. Existing identifiers must retain the same normalized owned path list. Existing state identifiers cannot be removed in this slice.
 
 **State transitions**:
+
+The transitions below preserve the original v1 design. For current destination ownership, generated state, projection replacement, stale cleanup, and rollback behavior, use the corresponding state transitions in [spec 0002](0002-exclusive-ownership-projected-destinations.md).
 
 1. No manifest: refresh is not configured and normal client sync is unchanged.
 2. Manifest with no state: first refresh is allowed only when every destination is absent. Successful projection creates state and one commit.
@@ -186,6 +203,8 @@ Refresh has no separate command or flag in the first slice. The presence of `.va
 | Commit refresh | requested subject `Refresh external documentation` | this specification; subject is not part of commit confirmation correctness |
 
 **Key invariants**:
+
+The invariants below include the original v1 ownership and rollback model. Spec 0002 supersedes those portions while preserving the source, client sync, and transaction outcome boundaries called out in the reconciliation section above.
 
 1. The manifest and state are version 1 strict JSON with the exact shapes defined above. The manifest must be tracked and identical to `HEAD` before refresh. Unknown fields, duplicate object members, duplicate identifiers, unknown state identifiers, malformed selectors, malformed commit identifiers, wrong types, and invalid paths are errors.
 2. Repository names and source paths use normalized relative path rules and cannot escape their configured roots. Destination paths use slash separated relative paths with one or more nonempty segments. They reject empty paths, empty segments, `.`, `..`, NUL, backslash, absolute forms, Windows volume forms, Windows UNC forms, and any path that escapes the vault. Destination paths are compared for exact and case insensitive ancestor or descendant overlap, and case insensitive aliases are rejected on every host.
@@ -236,6 +255,8 @@ The configured `source_root` bounds repository lookup. Canonical path checks rej
 
 The scope records a Tracer Bullet approach. First prove one thin client path through configuration, one explicit branch fetch, one regular file projection, one state write, one isolated commit, and normal sync integration. Then thicken that path with directories, multiple sources, ownership, boundary validation, and handled failure recovery. Do not build server behavior, migration commands, pinned revisions, or durable crash recovery as hidden prerequisites.
 
+This is the historical build plan for spec 0001. The completed ownership, version 2 state, exact projection, stale cleanup, and rollback work is specified by [spec 0002](0002-exclusive-ownership-projected-destinations.md). The source fetching and client sync integration decisions in this plan remain authoritative where spec 0002 does not change them.
+
 1. Build the first complete path with client `source_root` configuration, the minimum version 1 manifest and state parsing needed for one source and one regular file mapping, the atomic lock, one exact no tag branch fetch resolved from its immediate `FETCH_HEAD` result, projection into an empty destination, state generation, isolated staging and commit, the pre refresh `HEAD` capture and minimal post commit tree predicate, and integration into a new normal `vaultctl sync` with nonmutating preflight before any normal automatic save. Preserve the no manifest path and skip refresh for continuation and abort actions. This proves the thin happy path and only its implemented negative cases, and exercises selected portions of **AC-1**, **AC-3**, **AC-8**, **AC-10**, and **AC-11**. Full **AC-2**, **AC-7**, and **AC-9** acceptance waits for the later validation and recovery steps.
 2. Thicken the working path with directory mappings, multiple mappings and sources, same or descendant ancestry checks, exact ownership state, deterministic state ordering, first use and later refresh behavior, replacement and pruning within owned paths, and isolated temporary repository tests. This completes the projection and ownership portions of **AC-3**, **AC-5**, **AC-7**, and **AC-8** that depend on these broader cases.
 3. Add the remaining boundary validation: strict duplicate member and unknown field rejection, complete relative path grammar, case insensitive destination collision checks, control directory and file symlink checks, source tree entry validation, source and vault Git operation checks, dirty destination checks, and exact staging scope. This completes **AC-2**, **AC-4**, **AC-6**, and the remaining validation portions of **AC-7**.
@@ -258,6 +279,8 @@ The scope records a Tracer Bullet approach. First prove one thin client path thr
 2. Operators cannot change managed mappings or remove a source through this feature. Those changes fail until an explicit migration design exists.
 3. A source fetch may advance external Git state even when a later source fails. The command reports this and does not attempt rollback.
 4. The implementation needs careful temporary file recovery and exact Git staging to protect unrelated changes. Abrupt termination is outside the v1 rollback guarantee and can require manual recovery of refresh managed paths, index entries, or the lock.
+
+The ownership, generated state, projection, and rollback tradeoffs in this historical list are superseded where spec 0002 defines a later rule. The one way source authority, client only scope, separate refresh commit, source fetch progress, and unsupported projection features remain part of this specification unless spec 0002 states otherwise.
 
 **Neutral**:
 

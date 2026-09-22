@@ -15,6 +15,8 @@ This changelog was reconstructed from the repository's Git history. The project 
 
 - Changed normal client sync to refresh external documentation before saving unrelated vault changes and continuing normal upstream synchronization. Server mode and sync continuation or abort do not run the refresh.
 - Expanded `sync --abort` to abort an unfinished revert and to report the raw Git recovery command for an unsupported sequencer state.
+- Changed external documentation refresh to require a version 2 ownership inventory, reject legacy state and unexpected destination content before source fetch, and remove stale paths only from proven ownership records (see spec 0002).
+- Changed refresh staging and recovery to use exact projected file paths, preserving unrelated staged and unstaged vault work and reporting manual recovery when commit confirmation is uncertain (see spec 0002).
 
 ## 2026-07-16 — Initial implementation
 

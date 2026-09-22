@@ -15,6 +15,7 @@ _These are recommendations to keep the build orderly, not requirements. You can 
 | 2 | Vault inspection and save | Foundation | existing |
 | 3 | Client synchronization and recovery | Foundation | existing |
 | 4 | External documentation refresh and projection | Slice 1 | done |
+| 5 | Exclusive ownership for projected destinations | Slice 1 | done |
 
 ## Foundations
 
@@ -54,6 +55,23 @@ Expose selected documentation paths from multiple external project repositories 
 - [x] Test it: `/test external documentation refresh and projection`
 - [x] Review it (fresh model): `/check review external documentation refresh and projection`
 - [x] Document it: `/document external documentation refresh and projection`
+
+### 5. Exclusive ownership for projected destinations · done
+
+Treat every configured projection destination as owned by vaultctl. Refresh must reject ignored files, untracked files, unexpected empty directories, and other content outside the expected projection, while keeping projection one way from the external repository into the vault.
+
+**Done when:** Refresh fails before mutation when a managed destination contains unexpected content, successful refresh can remove stale projected content, and the transaction keeps the required pre commit rollback guarantee for unrelated vault work with substantially simpler recovery state where the ownership rule allows it.
+- [x] Design it (spec): `/architect exclusive ownership for projected destinations` ([0002](../specs/0002-exclusive-ownership-projected-destinations.md))
+- [x] Build it: `/develop exclusive ownership for projected destinations`
+  1. [x] Build version 2 path only ownership state and reject legacy root only state, satisfying AC-3
+  2. [x] Add the pre fetch ownership proof, deterministic diagnostics, and in memory revalidation baseline, satisfying AC-1, AC-2, and AC-6
+  3. [x] Implement exact projection inventories, stale cleanup, type changes, safe mutation ordering, and separate staging paths, satisfying AC-4, AC-5, and AC-7
+  4. [x] Adapt exact rollback and commit confirmation, then complete disposable repository and sync boundary tests, satisfying AC-8 and AC-9
+  Code in `internal/vaultctl/external_docs.go` and `internal/vaultctl/external_docs_test.go`.
+- [x] Verify it: `/check verify exclusive ownership for projected destinations`
+- [x] Test it: `/test exclusive ownership for projected destinations`
+- [x] Review it (fresh model): `/check review exclusive ownership for projected destinations`
+- [x] Document it: `/document exclusive ownership for projected destinations`
 
 ## Deferred
 

@@ -19,6 +19,7 @@ const (
 	externalStatePath     = ".vaultctl/external-docs-state.json"
 	externalLockPath      = ".vaultctl/external-docs.lock"
 	externalCommitSubject = "Refresh external documentation"
+	externalStateVersion  = 2
 )
 
 type externalMapping struct {
@@ -45,6 +46,7 @@ type externalStateSource struct {
 }
 
 type externalState struct {
+	Version int
 	Sources []externalStateSource
 }
 
@@ -61,6 +63,7 @@ type externalProjectionMapping struct {
 	Destination string
 	Directory   bool
 	Files       map[string][]byte
+	OwnedPaths  []string
 }
 
 type externalTreeEntry struct {
@@ -71,14 +74,33 @@ type externalTreeEntry struct {
 }
 
 type externalPathSnapshot struct {
-	mode     os.FileMode
-	content  []byte
-	link     string
-	children map[string]*externalPathSnapshot
+	mode    os.FileMode
+	content []byte
+	link    string
 }
 
 type externalProjectionSnapshot struct {
 	paths map[string]*externalPathSnapshot
+}
+
+type externalScannedPath struct {
+	Path    string
+	Kind    string
+	Mode    os.FileMode
+	Content []byte
+	Link    string
+}
+
+type externalOwnershipScan struct {
+	Paths []externalScannedPath
+}
+
+type externalRefreshBaseline struct {
+	Head            string
+	Manifest        []byte
+	State           []byte
+	Ownership       externalOwnershipScan
+	ManagedGitState string
 }
 
 type externalLock struct {
@@ -154,7 +176,11 @@ func (a *App) refreshExternalDocs() (retErr error) {
 	if err := validateExternalOwnership(manifest, state); err != nil {
 		return err
 	}
-	if err := a.validateExternalVaultState(root, manifest, state); err != nil {
+	ownership, err := a.validateExternalVaultState(root, manifest, state)
+	if err != nil {
+		return err
+	}
+	if err := a.validateCommittedExternalProjection(manifest, state); err != nil {
 		return err
 	}
 
@@ -166,12 +192,13 @@ func (a *App) refreshExternalDocs() (retErr error) {
 	if err != nil {
 		return err
 	}
-
-	plans, err := a.prepareExternalProjections(sourceRoot, manifest, state)
+	baseline, err := a.captureExternalRefreshBaseline(preHead, manifestBytes, stateBytes, ownership, manifest)
 	if err != nil {
 		return err
 	}
-	if err := validateExternalProjectionDestinations(root, plans); err != nil {
+
+	plans, err := a.prepareExternalProjections(sourceRoot, manifest, state)
+	if err != nil {
 		return err
 	}
 	desiredState := externalState{Sources: make([]externalStateSource, 0, len(plans))}
@@ -195,37 +222,43 @@ func (a *App) refreshExternalDocs() (retErr error) {
 		return nil
 	}
 
-	allowed := externalAllowedPaths(plans)
-	snapshot, err := snapshotExternalProjection(root, allowed)
+	if err := a.revalidateExternalRefreshBaseline(root, manifest, state, baseline); err != nil {
+		return err
+	}
+
+	replacementPaths := externalReplacementPaths(plans, state)
+	refreshFilePaths := externalRefreshFilePaths(plans, state)
+	snapshot, err := snapshotExternalProjection(root, replacementPaths)
 	if err != nil {
 		return fmt.Errorf("snapshot external documentation paths: %w", err)
 	}
-	if err := a.applyExternalProjection(root, plans, desiredStateBytes); err != nil {
-		return a.restoreExternalProjection(root, allowed, snapshot, err)
+	if err := a.applyExternalProjection(root, plans, state, desiredStateBytes); err != nil {
+		return a.restoreExternalProjection(root, replacementPaths, refreshFilePaths, snapshot, err)
 	}
-	if err := a.stageExternalProjection(allowed); err != nil {
-		return a.restoreExternalProjection(root, allowed, snapshot, err)
+	refreshPaths, err := a.stageExternalProjection(refreshFilePaths)
+	if err != nil {
+		return a.restoreExternalProjection(root, replacementPaths, refreshFilePaths, snapshot, err)
 	}
 
 	a.say("Creating external documentation refresh commit...")
-	commitResult, err := a.git.capture(commitArgs(externalCommitSubject, allowed)...)
+	commitResult, err := a.git.capture(commitArgs(externalCommitSubject, refreshPaths)...)
 	if err != nil {
-		return a.restoreExternalProjection(root, allowed, snapshot, err)
+		return a.restoreExternalProjection(root, replacementPaths, refreshFilePaths, snapshot, err)
 	}
 	currentHead, headErr := a.captureChecked("inspect refresh HEAD", "rev-parse", "HEAD")
 	if headErr != nil {
-		return a.terminalExternalRecovery(preHead, "unknown", allowed, fmt.Errorf("inspect post commit HEAD: %w", headErr))
+		return a.terminalExternalRecovery(preHead, "unknown", refreshPaths, fmt.Errorf("inspect post commit HEAD: %w", headErr))
 	}
 	if currentHead == preHead {
 		reason := fmt.Errorf("refresh commit did not advance HEAD")
 		if commitResult.exitCode != 0 && strings.TrimSpace(commitResult.stderr) != "" {
 			reason = fmt.Errorf("%w: %s", reason, strings.TrimSpace(commitResult.stderr))
 		}
-		return a.restoreExternalProjection(root, allowed, snapshot, reason)
+		return a.restoreExternalProjection(root, replacementPaths, refreshFilePaths, snapshot, reason)
 	}
 
-	if err := a.confirmExternalCommit(preHead, currentHead, plans, desiredStateBytes, allowed); err != nil {
-		return a.terminalExternalRecovery(preHead, currentHead, allowed, err)
+	if err := a.confirmExternalCommit(preHead, currentHead, plans, desiredStateBytes, refreshPaths); err != nil {
+		return a.terminalExternalRecovery(preHead, currentHead, refreshPaths, err)
 	}
 	a.say("External documentation refresh committed.")
 	return nil
@@ -298,81 +331,370 @@ func (a *App) rejectUntrackedPath(path string) error {
 	return nil
 }
 
-func (a *App) validateExternalVaultState(root string, manifest externalManifest, state externalState) error {
+func (a *App) validateExternalVaultState(root string, manifest externalManifest, state externalState) (externalOwnershipScan, error) {
 	if operation, err := a.detectOperation(); err != nil {
-		return err
+		return externalOwnershipScan{}, err
 	} else if operation.any() {
-		return fmt.Errorf("cannot refresh external documentation during an unfinished %s", operation.description())
+		return externalOwnershipScan{}, fmt.Errorf("cannot refresh external documentation during an unfinished %s", operation.description())
 	}
 	conflicts, err := a.conflictedFiles()
 	if err != nil {
-		return err
+		return externalOwnershipScan{}, err
 	}
 	if len(conflicts) > 0 {
-		return &userError{"external documentation refresh cannot start while the index contains unresolved conflicts."}
+		return externalOwnershipScan{}, &userError{"external documentation refresh cannot start while the index contains unresolved conflicts."}
 	}
 
-	paths := externalManifestPaths(manifest)
-	for _, entry := range state.Sources {
-		paths = append(paths, entry.OwnedPaths...)
-	}
-	for _, path := range uniqueSortedPaths(paths) {
+	destinations := uniqueSortedPaths(externalManifestPaths(manifest))
+	for _, path := range destinations {
 		if err := validateDestinationPath(root, path); err != nil {
-			return err
-		}
-		if err := a.rejectUntrackedPath(path); err != nil {
-			return err
-		}
-		result, err := a.git.capture("diff", "HEAD", "--quiet", "--", path)
-		if err != nil {
-			return err
-		}
-		if result.exitCode != 0 {
-			return fmt.Errorf("managed path %q has changes relative to HEAD", path)
+			return externalOwnershipScan{}, err
 		}
 	}
 	if err := validateControlFile(root, externalStatePath); err != nil {
-		return err
+		return externalOwnershipScan{}, err
 	}
 	if err := a.rejectUntrackedPath(externalStatePath); err != nil {
-		return err
+		return externalOwnershipScan{}, err
 	}
 	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(externalStatePath))); err == nil {
 		result, err := a.git.capture("diff", "HEAD", "--quiet", "--", externalStatePath)
 		if err != nil {
-			return err
+			return externalOwnershipScan{}, err
 		}
 		if result.exitCode != 0 {
-			return fmt.Errorf("managed path %q has changes relative to HEAD", externalStatePath)
+			return externalOwnershipScan{}, fmt.Errorf("dirty managed path %q: path has changes relative to HEAD", externalStatePath)
 		}
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect generated external documentation state: %w", err)
+		return externalOwnershipScan{}, fmt.Errorf("inspect generated external documentation state: %w", err)
 	}
 
+	expected := externalOwnershipByDestination(manifest, state)
+	scan := externalOwnershipScan{Paths: make([]externalScannedPath, 0)}
+	for _, destination := range uniqueSortedPaths(destinations) {
+		paths, err := scanExternalDestination(root, destination)
+		if err != nil {
+			return externalOwnershipScan{}, err
+		}
+		scan.Paths = append(scan.Paths, paths...)
+		if err := validateScannedDestination(destination, paths, expected[destination]); err != nil {
+			return externalOwnershipScan{}, err
+		}
+		if statePaths := expected[destination]; len(statePaths) > 0 {
+			if err := a.validateManagedDestinationGitState(destination); err != nil {
+				return externalOwnershipScan{}, err
+			}
+		}
+	}
+	return scan, nil
+}
+
+func (a *App) validateManagedDestinationGitState(destination string) error {
+	if err := a.rejectUntrackedPath(destination); err != nil {
+		return fmt.Errorf("dirty managed path %q: %w", destination, err)
+	}
+	result, err := a.git.capture("diff", "HEAD", "--quiet", "--", destination)
+	if err != nil {
+		return err
+	}
+	if result.exitCode != 0 {
+		return fmt.Errorf("dirty managed path %q: path has changes relative to HEAD", destination)
+	}
+	return nil
+}
+
+func externalOwnershipByDestination(manifest externalManifest, state externalState) map[string][]string {
+	owned := make(map[string][]string)
 	for _, source := range manifest.Sources {
+		entry, ok := stateSource(state, source.ID)
 		for _, mapping := range source.Mappings {
-			path := filepath.Join(root, filepath.FromSlash(mapping.Destination))
-			info, err := os.Lstat(path)
-			if err != nil {
-				if os.IsNotExist(err) {
-					continue
+			if ok {
+				for _, path := range entry.OwnedPaths {
+					if path == mapping.Destination || strings.HasPrefix(path, mapping.Destination+"/") {
+						owned[mapping.Destination] = append(owned[mapping.Destination], path)
+					}
 				}
-				return fmt.Errorf("inspect destination %q: %w", mapping.Destination, err)
 			}
-			if stateEntry, ok := stateSource(state, source.ID); !ok {
-				return fmt.Errorf("destination %q must be absent on the first refresh", mapping.Destination)
-			} else if !containsPath(stateEntry.OwnedPaths, mapping.Destination) {
-				return fmt.Errorf("source %q changed ownership of destination %q", source.ID, mapping.Destination)
+		}
+	}
+	return owned
+}
+
+func scanExternalDestination(root, destination string) ([]externalScannedPath, error) {
+	path := filepath.Join(root, filepath.FromSlash(destination))
+	_, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []externalScannedPath{{Path: destination, Kind: "absent"}}, nil
+		}
+		return nil, fmt.Errorf("inspect destination %q: %w", destination, err)
+	}
+	paths := make([]externalScannedPath, 0)
+	if err := scanExternalPath(path, destination, &paths); err != nil {
+		return nil, fmt.Errorf("scan destination %q: %w", destination, err)
+	}
+	sort.Slice(paths, func(i, j int) bool { return paths[i].Path < paths[j].Path })
+	return paths, nil
+}
+
+func scanExternalPath(path, relative string, paths *[]externalScannedPath) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	entry := externalScannedPath{Path: relative, Mode: info.Mode(), Kind: externalEntryKind(info.Mode())}
+	switch entry.Kind {
+	case "file":
+		entry.Content, err = os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+	case "symlink":
+		entry.Link, err = os.Readlink(path)
+		if err != nil {
+			return err
+		}
+	case "directory":
+		children, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		*paths = append(*paths, entry)
+		for _, child := range children {
+			childPath := filepath.Join(path, child.Name())
+			childRelative := relative + "/" + child.Name()
+			if err := scanExternalPath(childPath, childRelative, paths); err != nil {
+				return err
 			}
-			if info.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("destination %q is a symlink", mapping.Destination)
+		}
+		return nil
+	}
+	*paths = append(*paths, entry)
+	return nil
+}
+
+func externalEntryKind(mode os.FileMode) string {
+	switch {
+	case mode&os.ModeSymlink != 0:
+		return "symlink"
+	case mode.IsDir():
+		return "directory"
+	case mode.IsRegular():
+		return "file"
+	default:
+		return "special"
+	}
+}
+
+func validateScannedDestination(destination string, actual []externalScannedPath, expected []string) error {
+	expectedSet := make(map[string]bool, len(expected))
+	for _, path := range expected {
+		expectedSet[path] = true
+	}
+	actualByPath := make(map[string]externalScannedPath, len(actual))
+	for _, entry := range actual {
+		actualByPath[entry.Path] = entry
+	}
+	paths := make([]string, 0, len(actualByPath)+len(expectedSet))
+	seen := make(map[string]bool)
+	for path := range actualByPath {
+		if !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	for path := range expectedSet {
+		if !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		entry, exists := actualByPath[path]
+		if !exists {
+			return externalOwnershipViolation(destination, relativeDestinationPath(destination, path), "missing owned path")
+		}
+		if entry.Kind == "absent" {
+			if len(expectedSet) > 0 {
+				return externalOwnershipViolation(destination, ".", "missing owned path")
 			}
-			if err := validateDestinationTree(path); err != nil {
-				return fmt.Errorf("validate destination %q: %w", mapping.Destination, err)
+			continue
+		}
+		if entry.Kind == "symlink" {
+			return externalOwnershipViolation(destination, relativeDestinationPath(destination, path), "symlink")
+		}
+		if entry.Kind == "special" {
+			return externalOwnershipViolation(destination, relativeDestinationPath(destination, path), "special entry")
+		}
+		if !expectedSet[path] {
+			category := "unexpected file"
+			if entry.Kind == "directory" {
+				category = "unexpected directory"
+			}
+			return externalOwnershipViolation(destination, relativeDestinationPath(destination, path), category)
+		}
+		expectedDirectory := ownedPathHasDescendant(expected, path)
+		if expectedDirectory && entry.Kind != "directory" {
+			return externalOwnershipViolation(destination, relativeDestinationPath(destination, path), "ownership mismatch")
+		}
+		if !expectedDirectory && entry.Kind != "file" {
+			return externalOwnershipViolation(destination, relativeDestinationPath(destination, path), "ownership mismatch")
+		}
+	}
+	return nil
+}
+
+func ownedPathHasDescendant(paths []string, path string) bool {
+	prefix := path + "/"
+	for _, candidate := range paths {
+		if strings.HasPrefix(candidate, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func relativeDestinationPath(destination, path string) string {
+	if path == destination {
+		return "."
+	}
+	return strings.TrimPrefix(path, destination+"/")
+}
+
+func externalOwnershipViolation(destination, relative, category string) error {
+	return fmt.Errorf("external destination %q relative path %q: %s", destination, relative, category)
+}
+
+func (a *App) validateCommittedExternalProjection(manifest externalManifest, state externalState) error {
+	for _, source := range manifest.Sources {
+		entry, ok := stateSource(state, source.ID)
+		if !ok {
+			continue
+		}
+		for _, mapping := range source.Mappings {
+			expected := make(map[string]bool)
+			for _, path := range entry.OwnedPaths {
+				if (path == mapping.Destination || strings.HasPrefix(path, mapping.Destination+"/")) && !ownedPathHasDescendant(entry.OwnedPaths, path) {
+					expected[path] = true
+				}
+			}
+			actual, err := externalTreeEntries(a.cfg.VaultPath, "HEAD", mapping.Destination)
+			if err != nil {
+				return fmt.Errorf("validate committed projection at %q: %w", mapping.Destination, err)
+			}
+			actualPaths := make(map[string]bool, len(actual))
+			for _, treeEntry := range actual {
+				if treeEntry.Type != "blob" || (treeEntry.Mode != "100644" && treeEntry.Mode != "100755") {
+					return externalOwnershipViolation(mapping.Destination, relativeDestinationPath(mapping.Destination, treeEntry.Path), "committed projection mismatch")
+				}
+				actualPaths[treeEntry.Path] = true
+			}
+			paths := make([]string, 0, len(expected)+len(actualPaths))
+			seen := make(map[string]bool)
+			for path := range expected {
+				seen[path] = true
+				paths = append(paths, path)
+			}
+			for path := range actualPaths {
+				if !seen[path] {
+					seen[path] = true
+					paths = append(paths, path)
+				}
+			}
+			sort.Strings(paths)
+			for _, path := range paths {
+				if expected[path] != actualPaths[path] {
+					return externalOwnershipViolation(mapping.Destination, relativeDestinationPath(mapping.Destination, path), "committed projection mismatch")
+				}
 			}
 		}
 	}
 	return nil
+}
+
+func (a *App) captureExternalRefreshBaseline(head string, manifest, state []byte, ownership externalOwnershipScan, manifestModel externalManifest) (externalRefreshBaseline, error) {
+	managed, err := a.captureExternalManagedGitState(manifestModel)
+	if err != nil {
+		return externalRefreshBaseline{}, err
+	}
+	return externalRefreshBaseline{
+		Head:            head,
+		Manifest:        append([]byte(nil), manifest...),
+		State:           append([]byte(nil), state...),
+		Ownership:       ownership,
+		ManagedGitState: managed,
+	}, nil
+}
+
+func (a *App) revalidateExternalRefreshBaseline(root string, manifest externalManifest, state externalState, baseline externalRefreshBaseline) error {
+	head, err := a.captureChecked("revalidate refresh HEAD", "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	if head != baseline.Head {
+		return fmt.Errorf("external documentation refresh baseline changed: vault HEAD advanced from %s to %s", baseline.Head, head)
+	}
+	manifestPath := filepath.Join(root, filepath.FromSlash(externalManifestPath))
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("revalidate external documentation manifest: %w", err)
+	}
+	if !bytes.Equal(manifestBytes, baseline.Manifest) {
+		return fmt.Errorf("external documentation refresh baseline changed: manifest bytes changed")
+	}
+	statePath := filepath.Join(root, filepath.FromSlash(externalStatePath))
+	stateBytes, err := os.ReadFile(statePath)
+	if os.IsNotExist(err) {
+		stateBytes = nil
+	} else if err != nil {
+		return fmt.Errorf("revalidate generated external documentation state: %w", err)
+	}
+	if !bytes.Equal(stateBytes, baseline.State) {
+		return fmt.Errorf("external documentation refresh baseline changed: state bytes changed")
+	}
+	current, err := a.validateExternalVaultState(root, manifest, state)
+	if err != nil {
+		return err
+	}
+	if !equalExternalOwnershipScan(current, baseline.Ownership) {
+		return fmt.Errorf("external documentation refresh baseline changed: ownership scan changed")
+	}
+	managed, err := a.captureExternalManagedGitState(manifest)
+	if err != nil {
+		return err
+	}
+	if managed != baseline.ManagedGitState {
+		return fmt.Errorf("external documentation refresh baseline changed: managed Git state changed")
+	}
+	return nil
+}
+
+func (a *App) captureExternalManagedGitState(manifest externalManifest) (string, error) {
+	paths := externalManifestPaths(manifest)
+	args := []string{"status", "--porcelain=v2", "-z", "--untracked-files=all", "--"}
+	args = append(args, uniqueSortedPaths(paths)...)
+	result, err := a.git.capture(args...)
+	if err != nil {
+		return "", err
+	}
+	if result.exitCode != 0 {
+		return "", fmt.Errorf("inspect managed Git state failed (Git exited with status %d)", result.exitCode)
+	}
+	return result.stdout, nil
+}
+
+func equalExternalOwnershipScan(left, right externalOwnershipScan) bool {
+	if len(left.Paths) != len(right.Paths) {
+		return false
+	}
+	for index := range left.Paths {
+		leftPath, rightPath := left.Paths[index], right.Paths[index]
+		if leftPath.Path != rightPath.Path || leftPath.Kind != rightPath.Kind || leftPath.Mode != rightPath.Mode || leftPath.Link != rightPath.Link || !bytes.Equal(leftPath.Content, rightPath.Content) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *App) prepareExternalProjections(sourceRoot string, manifest externalManifest, state externalState) ([]externalProjection, error) {
@@ -424,22 +746,37 @@ func (a *App) prepareExternalProjections(sourceRoot string, manifest externalMan
 	return plans, nil
 }
 
-func (a *App) applyExternalProjection(root string, plans []externalProjection, stateBytes []byte) error {
+func (a *App) applyExternalProjection(root string, plans []externalProjection, state externalState, stateBytes []byte) error {
+	oldKinds := externalOwnedPathKinds(state)
+	newKinds := externalPlanPathKinds(plans)
+	for _, path := range deepestFirstExternalPaths(externalPathsOfKind(oldKinds, "file")) {
+		if newKinds[path] != "file" {
+			if err := removeExternalFile(filepath.Join(root, filepath.FromSlash(path))); err != nil {
+				return fmt.Errorf("remove stale projected file %q: %w", path, err)
+			}
+		}
+	}
+	for _, path := range deepestFirstExternalPaths(externalPathsOfKind(oldKinds, "directory")) {
+		if newKinds[path] != "directory" {
+			if err := removeExternalDirectory(filepath.Join(root, filepath.FromSlash(path))); err != nil {
+				return fmt.Errorf("remove stale projected directory %q: %w", path, err)
+			}
+		}
+	}
+	for _, path := range shallowFirstExternalPaths(newKinds, "directory") {
+		if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(path)), 0o755); err != nil {
+			return fmt.Errorf("create projected directory %q: %w", path, err)
+		}
+	}
 	for _, plan := range plans {
 		for _, mapping := range plan.Mappings {
-			destination := filepath.Join(root, filepath.FromSlash(mapping.Destination))
-			if err := removeExternalPath(destination); err != nil {
-				return fmt.Errorf("replace destination %q: %w", mapping.Destination, err)
+			paths := make([]string, 0, len(mapping.Files))
+			for path := range mapping.Files {
+				paths = append(paths, path)
 			}
-			if mapping.Directory {
-				for path, content := range mapping.Files {
-					if err := writeExternalFile(root, path, content); err != nil {
-						return err
-					}
-				}
-			} else {
-				content := mapping.Files[mapping.Destination]
-				if err := writeExternalFile(root, mapping.Destination, content); err != nil {
+			sort.Strings(paths)
+			for _, path := range paths {
+				if err := writeExternalFile(root, path, mapping.Files[path]); err != nil {
 					return err
 				}
 			}
@@ -452,26 +789,132 @@ func (a *App) applyExternalProjection(root string, plans []externalProjection, s
 	return nil
 }
 
-func (a *App) stageExternalProjection(allowed []string) error {
-	before, err := a.cachedPaths()
+func externalOwnedPathKinds(state externalState) map[string]string {
+	kinds := make(map[string]string)
+	for _, source := range state.Sources {
+		for _, path := range source.OwnedPaths {
+			kind := "file"
+			if ownedPathHasDescendant(source.OwnedPaths, path) {
+				kind = "directory"
+			}
+			kinds[path] = kind
+		}
+	}
+	return kinds
+}
+
+func externalPlanPathKinds(plans []externalProjection) map[string]string {
+	kinds := make(map[string]string)
+	for _, plan := range plans {
+		for _, mapping := range plan.Mappings {
+			for _, path := range mapping.OwnedPaths {
+				kind := "file"
+				if ownedPathHasDescendant(mapping.OwnedPaths, path) {
+					kind = "directory"
+				}
+				kinds[path] = kind
+			}
+		}
+	}
+	return kinds
+}
+
+func externalPathsOfKind(kinds map[string]string, wanted string) []string {
+	paths := make([]string, 0)
+	for path, kind := range kinds {
+		if kind == wanted {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+func deepestFirstExternalPaths(paths []string) []string {
+	sort.Slice(paths, func(i, j int) bool {
+		leftDepth := strings.Count(paths[i], "/")
+		rightDepth := strings.Count(paths[j], "/")
+		if leftDepth != rightDepth {
+			return leftDepth > rightDepth
+		}
+		return paths[i] < paths[j]
+	})
+	return paths
+}
+
+func shallowFirstExternalPaths(kinds map[string]string, wanted string) []string {
+	paths := externalPathsOfKind(kinds, wanted)
+	return shallowFirstExternalPathList(paths)
+}
+
+func shallowFirstExternalPathsForPaths(paths []string) []string {
+	return shallowFirstExternalPathList(append([]string(nil), paths...))
+}
+
+func shallowFirstExternalPathList(paths []string) []string {
+	sort.Slice(paths, func(i, j int) bool {
+		leftDepth := strings.Count(paths[i], "/")
+		rightDepth := strings.Count(paths[j], "/")
+		if leftDepth != rightDepth {
+			return leftDepth < rightDepth
+		}
+		return paths[i] < paths[j]
+	})
+	return paths
+}
+
+func removeExternalFile(path string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	args := []string{"add", "-A", "--"}
-	args = append(args, allowed...)
-	if err := a.checkedStream("stage external documentation", args...); err != nil {
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("path is not a regular file")
+	}
+	return os.Remove(path)
+}
+
+func removeExternalDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
 		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path is not a directory")
+	}
+	return os.Remove(path)
+}
+
+func (a *App) stageExternalProjection(refreshFilePaths []string) ([]string, error) {
+	before, err := a.cachedPaths()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"add", "-A", "--"}
+	args = append(args, refreshFilePaths...)
+	if err := a.checkedStream("stage external documentation", args...); err != nil {
+		return nil, err
 	}
 	after, err := a.cachedPaths()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	changed := make([]string, 0)
 	for path := range after {
-		if !before[path] && !pathAllowed(path, allowed) {
-			return fmt.Errorf("refresh staging changed unrelated path %q", path)
+		if !before[path] && !containsPath(refreshFilePaths, path) {
+			return nil, fmt.Errorf("refresh staging changed unrelated path %q", path)
+		}
+		if !before[path] {
+			changed = append(changed, path)
 		}
 	}
-	return nil
+	sort.Strings(changed)
+	return changed, nil
 }
 
 func (a *App) cachedPaths() (map[string]bool, error) {
@@ -491,7 +934,7 @@ func (a *App) cachedPaths() (map[string]bool, error) {
 	return paths, nil
 }
 
-func (a *App) confirmExternalCommit(preHead, currentHead string, plans []externalProjection, stateBytes []byte, allowed []string) error {
+func (a *App) confirmExternalCommit(preHead, currentHead string, plans []externalProjection, stateBytes []byte, expectedPaths []string) error {
 	parents, err := a.captureChecked("inspect refresh commit parents", "rev-list", "--parents", "-n", "1", currentHead)
 	if err != nil {
 		return err
@@ -504,10 +947,15 @@ func (a *App) confirmExternalCommit(preHead, currentHead string, plans []externa
 	if err != nil {
 		return err
 	}
+	actualPaths := make([]string, 0)
 	for _, path := range strings.Split(changed, "\x00") {
-		if path != "" && !pathAllowed(path, allowed) {
-			return fmt.Errorf("refresh commit changed unrelated path %q", path)
+		if path != "" {
+			actualPaths = append(actualPaths, path)
 		}
+	}
+	sort.Strings(actualPaths)
+	if !slicesEqual(actualPaths, expectedPaths) {
+		return fmt.Errorf("refresh commit changed paths %v, want %v", actualPaths, expectedPaths)
 	}
 	for _, plan := range plans {
 		for _, mapping := range plan.Mappings {
@@ -544,9 +992,10 @@ func (a *App) confirmExternalCommit(preHead, currentHead string, plans []externa
 	return nil
 }
 
-func snapshotExternalProjection(root string, allowed []string) (externalProjectionSnapshot, error) {
-	snapshot := externalProjectionSnapshot{paths: make(map[string]*externalPathSnapshot, len(allowed))}
-	for _, path := range allowed {
+func snapshotExternalProjection(root string, replacementPaths []string) (externalProjectionSnapshot, error) {
+	paths := uniqueSortedPaths(replacementPaths)
+	snapshot := externalProjectionSnapshot{paths: make(map[string]*externalPathSnapshot, len(paths))}
+	for _, path := range paths {
 		entry, err := snapshotExternalPath(filepath.Join(root, filepath.FromSlash(path)))
 		if err != nil {
 			return externalProjectionSnapshot{}, fmt.Errorf("snapshot managed path %q: %w", path, err)
@@ -572,19 +1021,6 @@ func snapshotExternalPath(path string) (*externalPathSnapshot, error) {
 			return nil, err
 		}
 	case info.IsDir():
-		entry.children = make(map[string]*externalPathSnapshot)
-		children, err := os.ReadDir(path)
-		if err != nil {
-			return nil, err
-		}
-		for _, child := range children {
-			childPath := filepath.Join(path, child.Name())
-			childSnapshot, err := snapshotExternalPath(childPath)
-			if err != nil {
-				return nil, err
-			}
-			entry.children[child.Name()] = childSnapshot
-		}
 	case info.Mode().IsRegular():
 		entry.content, err = os.ReadFile(path)
 		if err != nil {
@@ -596,8 +1032,22 @@ func snapshotExternalPath(path string) (*externalPathSnapshot, error) {
 	return entry, nil
 }
 
-func (a *App) restoreExternalProjection(root string, allowed []string, snapshot externalProjectionSnapshot, cause error) error {
-	for _, path := range allowed {
+func (a *App) restoreExternalProjection(root string, replacementPaths, refreshFilePaths []string, snapshot externalProjectionSnapshot, cause error) error {
+	removePaths := make([]string, 0, len(replacementPaths))
+	restorePaths := make([]string, 0, len(replacementPaths))
+	for _, path := range uniqueSortedPaths(replacementPaths) {
+		if snapshot.paths[path] == nil {
+			removePaths = append(removePaths, path)
+		} else {
+			restorePaths = append(restorePaths, path)
+		}
+	}
+	for _, path := range deepestFirstExternalPaths(removePaths) {
+		if err := restoreExternalPath(filepath.Join(root, filepath.FromSlash(path)), nil); err != nil {
+			return errors.Join(cause, fmt.Errorf("restore managed path %q: %w", path, err))
+		}
+	}
+	for _, path := range shallowFirstExternalPathsForPaths(restorePaths) {
 		if err := restoreExternalPath(filepath.Join(root, filepath.FromSlash(path)), snapshot.paths[path]); err != nil {
 			return errors.Join(cause, fmt.Errorf("restore managed path %q: %w", path, err))
 		}
@@ -609,7 +1059,7 @@ func (a *App) restoreExternalProjection(root string, allowed []string, snapshot 
 	}
 	stagedManaged := make([]string, 0)
 	for path := range staged {
-		if pathAllowed(path, allowed) {
+		if containsPath(refreshFilePaths, path) {
 			stagedManaged = append(stagedManaged, path)
 		}
 	}
@@ -622,7 +1072,7 @@ func (a *App) restoreExternalProjection(root string, allowed []string, snapshot 
 		}
 	}
 
-	tracked, err := a.trackedExternalPaths(allowed)
+	tracked, err := a.trackedExternalPaths(refreshFilePaths)
 	if err != nil {
 		return errors.Join(cause, fmt.Errorf("inspect tracked refresh paths for restoration: %w", err))
 	}
@@ -664,25 +1114,7 @@ func restoreExternalPath(path string, snapshot *externalPathSnapshot) error {
 			return materializeExternalPath(path, snapshot)
 		}
 	case snapshot.mode.IsDir():
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			return err
-		}
-		for _, entry := range entries {
-			if _, ok := snapshot.children[entry.Name()]; !ok {
-				if err := removeExternalPath(filepath.Join(path, entry.Name())); err != nil {
-					return err
-				}
-			}
-		}
-		for name, child := range snapshot.children {
-			if err := restoreExternalPath(filepath.Join(path, name), child); err != nil {
-				return err
-			}
-		}
-		if err := os.Chmod(path, snapshot.mode.Perm()); err != nil {
-			return err
-		}
+		return os.Chmod(path, snapshot.mode.Perm())
 	case snapshot.mode.IsRegular():
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -711,11 +1143,6 @@ func materializeExternalPath(path string, snapshot *externalPathSnapshot) error 
 		if err := os.MkdirAll(path, snapshot.mode.Perm()); err != nil {
 			return err
 		}
-		for name, child := range snapshot.children {
-			if err := materializeExternalPath(filepath.Join(path, name), child); err != nil {
-				return err
-			}
-		}
 		return os.Chmod(path, snapshot.mode.Perm())
 	case snapshot.mode.IsRegular():
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -730,9 +1157,9 @@ func materializeExternalPath(path string, snapshot *externalPathSnapshot) error 
 	}
 }
 
-func (a *App) trackedExternalPaths(allowed []string) ([]string, error) {
+func (a *App) trackedExternalPaths(refreshFilePaths []string) ([]string, error) {
 	args := []string{"ls-tree", "-r", "-z", "--name-only", "HEAD", "--"}
-	args = append(args, allowed...)
+	args = append(args, refreshFilePaths...)
 	result, err := a.git.capture(args...)
 	if err != nil {
 		return nil, err
@@ -750,13 +1177,13 @@ func (a *App) trackedExternalPaths(allowed []string) ([]string, error) {
 	return paths, nil
 }
 
-func (a *App) terminalExternalRecovery(preHead, currentHead string, allowed []string, cause error) error {
-	return fmt.Errorf("external documentation refresh entered manual recovery: captured pre refresh HEAD %s, current HEAD %s, expected refresh paths %s, reason: %w", preHead, currentHead, strings.Join(allowed, ", "), cause)
+func (a *App) terminalExternalRecovery(preHead, currentHead string, refreshPaths []string, cause error) error {
+	return fmt.Errorf("external documentation refresh entered manual recovery: captured pre refresh HEAD %s, current HEAD %s, expected refresh paths %s, reason: %w", preHead, currentHead, strings.Join(refreshPaths, ", "), cause)
 }
 
-func commitArgs(subject string, allowed []string) []string {
+func commitArgs(subject string, paths []string) []string {
 	args := []string{"commit", "--only", "-m", subject, "--"}
-	return append(args, allowed...)
+	return append(args, paths...)
 }
 
 func parseExternalManifest(data []byte) (externalManifest, error) {
@@ -874,14 +1301,18 @@ func parseExternalState(data []byte) (externalState, error) {
 	if err := requireKeys(object, "version", "sources"); err != nil {
 		return externalState{}, err
 	}
-	if err := requireVersion(object["version"]); err != nil {
+	version, err := externalStateVersionValue(object["version"])
+	if err != nil {
 		return externalState{}, err
+	}
+	if version == 1 {
+		return externalState{}, fmt.Errorf("generated external documentation state version 1 requires migration")
 	}
 	values, err := jsonArray(object["sources"])
 	if err != nil || len(values) == 0 {
 		return externalState{}, fmt.Errorf("sources must be a nonempty array")
 	}
-	state := externalState{Sources: make([]externalStateSource, 0, len(values))}
+	state := externalState{Version: version, Sources: make([]externalStateSource, 0, len(values))}
 	seenIDs := make(map[string]bool)
 	previousID := ""
 	for index, value := range values {
@@ -937,13 +1368,18 @@ func parseExternalState(data []byte) (externalState, error) {
 			seenPaths[path] = true
 			owned = append(owned, path)
 		}
-		sort.Strings(owned)
+		if err := validateOwnedPathTree(owned); err != nil {
+			return externalState{}, fmt.Errorf("state source %q owned paths: %w", id, err)
+		}
 		state.Sources = append(state.Sources, externalStateSource{ID: id, ResolvedCommit: commit, OwnedPaths: owned})
 	}
 	return state, nil
 }
 
 func marshalExternalState(state externalState) ([]byte, error) {
+	if state.Version != 0 && state.Version != externalStateVersion {
+		return nil, fmt.Errorf("generated external documentation state must use version %d", externalStateVersion)
+	}
 	copyState := externalState{Sources: append([]externalStateSource(nil), state.Sources...)}
 	sort.Slice(copyState.Sources, func(i, j int) bool { return copyState.Sources[i].ID < copyState.Sources[j].ID })
 	type outputSource struct {
@@ -955,10 +1391,13 @@ func marshalExternalState(state externalState) ([]byte, error) {
 		Version int            `json:"version"`
 		Sources []outputSource `json:"sources"`
 	}
-	output := outputState{Version: 1, Sources: make([]outputSource, 0, len(copyState.Sources))}
+	output := outputState{Version: externalStateVersion, Sources: make([]outputSource, 0, len(copyState.Sources))}
 	for _, source := range copyState.Sources {
 		paths := append([]string(nil), source.OwnedPaths...)
 		sort.Strings(paths)
+		if err := validateOwnedPathTree(paths); err != nil {
+			return nil, fmt.Errorf("state source %q owned paths: %w", source.ID, err)
+		}
 		output.Sources = append(output.Sources, outputSource{ID: source.ID, ResolvedCommit: source.ResolvedCommit, OwnedPaths: paths})
 	}
 	data, err := json.MarshalIndent(output, "", "  ")
@@ -966,6 +1405,52 @@ func marshalExternalState(state externalState) ([]byte, error) {
 		return nil, fmt.Errorf("marshal generated external documentation state: %w", err)
 	}
 	return append(data, '\n'), nil
+}
+
+func externalStateVersionValue(value any) (int, error) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, fmt.Errorf("version must be integer %d", externalStateVersion)
+	}
+	switch number.String() {
+	case "1":
+		return 1, nil
+	case "2":
+		return externalStateVersion, nil
+	default:
+		return 0, fmt.Errorf("version must be integer %d", externalStateVersion)
+	}
+}
+
+func validateOwnedPathTree(paths []string) error {
+	seen := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		normalized, err := normalizeRelativePath(path)
+		if err != nil || normalized != path {
+			return fmt.Errorf("contains non-normalized owned path %q", path)
+		}
+		if seen[path] {
+			return fmt.Errorf("contains duplicate owned path %q", path)
+		}
+		seen[path] = true
+		parts := strings.Split(path, "/")
+		nearestAncestor := 0
+		for index := 1; index < len(parts); index++ {
+			if seen[strings.Join(parts[:index], "/")] {
+				nearestAncestor = index
+			}
+		}
+		if nearestAncestor == 0 {
+			continue
+		}
+		for index := nearestAncestor + 1; index < len(parts); index++ {
+			ancestor := strings.Join(parts[:index], "/")
+			if !seen[ancestor] {
+				return fmt.Errorf("is missing directory ancestor %q", ancestor)
+			}
+		}
+	}
+	return nil
 }
 
 func parseStrictJSON(data []byte) (any, error) {
@@ -1225,50 +1710,6 @@ func validatePathNotControl(path string) error {
 	return nil
 }
 
-func validateDestinationTree(path string) error {
-	return filepath.WalkDir(path, func(current string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("contains symlink %q", current)
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("contains unsupported entry %q", current)
-		}
-		return nil
-	})
-}
-
-func validateExternalProjectionDestinations(root string, plans []externalProjection) error {
-	for _, plan := range plans {
-		for _, mapping := range plan.Mappings {
-			path := filepath.Join(root, filepath.FromSlash(mapping.Destination))
-			info, err := os.Lstat(path)
-			if err != nil {
-				if os.IsNotExist(err) {
-					continue
-				}
-				return fmt.Errorf("inspect destination %q: %w", mapping.Destination, err)
-			}
-			if mapping.Directory && !info.IsDir() {
-				return fmt.Errorf("directory mapping destination %q is not a directory", mapping.Destination)
-			}
-			if !mapping.Directory && info.IsDir() {
-				return fmt.Errorf("file mapping destination %q is a directory", mapping.Destination)
-			}
-		}
-	}
-	return nil
-}
-
 func canonicalDirectory(path string) (string, error) {
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -1501,12 +1942,18 @@ func buildExternalProjection(repository string, source externalSource, commit st
 		if err != nil {
 			return externalProjection{}, fmt.Errorf("mapping %q: %w", mapping.Source, err)
 		}
-		projection := externalProjectionMapping{Source: mapping.Source, Destination: mapping.Destination, Files: make(map[string][]byte)}
+		projection := externalProjectionMapping{Source: mapping.Source, Destination: mapping.Destination, Files: make(map[string][]byte), OwnedPaths: []string{mapping.Destination}}
 		for index, entry := range entries {
 			if entry.Type == "tree" {
 				if index == 0 {
 					projection.Directory = true
 				}
+				path := mapping.Destination
+				if entry.Path != mapping.Source {
+					relative := strings.TrimPrefix(entry.Path, mapping.Source+"/")
+					path = mapping.Destination + "/" + relative
+				}
+				projection.OwnedPaths = append(projection.OwnedPaths, path)
 				continue
 			}
 			if entry.Type != "blob" || (entry.Mode != "100644" && entry.Mode != "100755") {
@@ -1525,14 +1972,19 @@ func buildExternalProjection(repository string, source externalSource, commit st
 				return externalProjection{}, fmt.Errorf("read selected entry %q failed: %s", entry.Path, strings.TrimSpace(content.stderr))
 			}
 			projection.Files[path] = []byte(content.stdout)
+			projection.OwnedPaths = append(projection.OwnedPaths, path)
 		}
 		if !projection.Directory && len(entries) != 1 {
 			return externalProjection{}, fmt.Errorf("mapping %q has unexpected tree entries", mapping.Source)
 		}
+		if projection.Directory && len(projection.Files) == 0 {
+			return externalProjection{}, fmt.Errorf("mapping %q selects an empty directory", mapping.Source)
+		}
+		projection.OwnedPaths = uniqueSortedPaths(projection.OwnedPaths)
 		plan.Mappings = append(plan.Mappings, projection)
-		plan.OwnedPaths = append(plan.OwnedPaths, mapping.Destination)
+		plan.OwnedPaths = append(plan.OwnedPaths, projection.OwnedPaths...)
 	}
-	sort.Strings(plan.OwnedPaths)
+	plan.OwnedPaths = uniqueSortedPaths(plan.OwnedPaths)
 	return plan, nil
 }
 
@@ -1690,24 +2142,33 @@ func removeExternalPath(path string) error {
 		}
 		return err
 	}
-	return os.RemoveAll(path)
+	return os.Remove(path)
 }
 
-func externalAllowedPaths(plans []externalProjection) []string {
+func externalReplacementPaths(plans []externalProjection, state externalState) []string {
 	paths := []string{externalStatePath}
+	for _, source := range state.Sources {
+		paths = append(paths, source.OwnedPaths...)
+	}
 	for _, plan := range plans {
 		paths = append(paths, plan.OwnedPaths...)
 	}
 	return uniqueSortedPaths(paths)
 }
 
-func pathAllowed(path string, allowed []string) bool {
-	for _, candidate := range allowed {
-		if path == candidate || strings.HasPrefix(path, candidate+"/") {
-			return true
+func externalRefreshFilePaths(plans []externalProjection, state externalState) []string {
+	paths := []string{externalStatePath}
+	for path, kind := range externalOwnedPathKinds(state) {
+		if kind == "file" {
+			paths = append(paths, path)
 		}
 	}
-	return false
+	for path, kind := range externalPlanPathKinds(plans) {
+		if kind == "file" {
+			paths = append(paths, path)
+		}
+	}
+	return uniqueSortedPaths(paths)
 }
 
 func externalManifestPaths(manifest externalManifest) []string {
@@ -1735,7 +2196,27 @@ func validateExternalOwnership(manifest externalManifest, state externalState) e
 			owned = append(owned, mapping.Destination)
 		}
 		sort.Strings(owned)
-		if !slicesEqual(owned, entry.OwnedPaths) {
+		for _, destination := range owned {
+			if !containsPath(entry.OwnedPaths, destination) {
+				return fmt.Errorf("source %q changed its owned destination paths", entry.ID)
+			}
+		}
+		for _, path := range entry.OwnedPaths {
+			belongs := false
+			for _, destination := range owned {
+				if path == destination || strings.HasPrefix(path, destination+"/") {
+					belongs = true
+					break
+				}
+			}
+			if !belongs {
+				return fmt.Errorf("source %q contains owned path outside its destinations: %q", entry.ID, path)
+			}
+		}
+		if err := validateOwnedPathTree(entry.OwnedPaths); err != nil {
+			return fmt.Errorf("source %q owned paths: %w", entry.ID, err)
+		}
+		if len(entry.OwnedPaths) < len(owned) {
 			return fmt.Errorf("source %q changed its owned destination paths", entry.ID)
 		}
 	}

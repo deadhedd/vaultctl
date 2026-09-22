@@ -22,6 +22,7 @@ This package contains the command line behavior for vaultctl. It parses commands
 - Client mode uses the configured vault as the process directory. Server mode supplies explicit bare repository and worktree arguments.
 - Check the current repository state before changing it. A sync first checks the worktree, unfinished operations, conflicts, and upstream configuration.
 - A normal client sync refreshes selected external documentation only when the tracked `.vaultctl/external-docs.json` manifest exists. It uses the configured `source_root`, explicit source remotes and branches, and one isolated refresh commit. Server mode and sync continuation or abort do not run refresh.
+- External documentation refresh requires tracked version 2 ownership state and an exact committed and filesystem projection match before source fetch. It rejects legacy state and unexpected destination content, and uses exact owned file paths for refresh staging and recovery.
 - Keep synchronization outcomes explicit: equal, ahead, behind, or diverged. Diverged histories use rebase by default or merge only with `--merge`.
 - Report conflicts and require the user to resolve them. Continue only after unresolved index entries are gone.
 

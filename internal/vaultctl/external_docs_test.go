@@ -2,9 +2,12 @@ package vaultctl
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -33,6 +36,83 @@ func setupExternalSource(t testing.TB) (sourceRoot, sourceRepo, sourceRemote str
 	runGit(t, sourceRepo, "remote", "add", "origin", sourceRemote)
 	runGit(t, sourceRepo, "push", "-u", "origin", "main")
 	return sourceRoot, sourceRepo, sourceRemote
+}
+
+func installGitFetchMutation(t testing.TB, sourceRepo, mutationPath, mutationContent string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	marker := filepath.Join(binDir, "mutation.done")
+	wrapper := filepath.Join(binDir, "git")
+	writeTestFile(t, wrapper, `#!/bin/sh
+"$VAULTCTL_REAL_GIT" "$@"
+status=$?
+is_fetch=false
+for arg in "$@"; do
+	if [ "$arg" = "fetch" ]; then
+		is_fetch=true
+	fi
+done
+if [ "$status" -eq 0 ] && [ "$PWD" = "$VAULTCTL_SOURCE_REPO" ] && [ "$is_fetch" = true ] && [ ! -e "$VAULTCTL_MUTATION_MARKER" ]; then
+	printf '%s' "$VAULTCTL_MUTATION_CONTENT" > "$VAULTCTL_MUTATION_PATH"
+	touch "$VAULTCTL_MUTATION_MARKER"
+fi
+exit "$status"
+`)
+	if err := os.Chmod(wrapper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VAULTCTL_REAL_GIT", realGit)
+	t.Setenv("VAULTCTL_SOURCE_REPO", sourceRepo)
+	t.Setenv("VAULTCTL_MUTATION_PATH", mutationPath)
+	t.Setenv("VAULTCTL_MUTATION_CONTENT", mutationContent)
+	t.Setenv("VAULTCTL_MUTATION_MARKER", marker)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func installGitManagedStateMutation(t testing.TB, vaultRoot, mutationPath, mutationContent string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	countPath := filepath.Join(binDir, "managed-status.count")
+	wrapper := filepath.Join(binDir, "git")
+	writeTestFile(t, wrapper, `#!/bin/sh
+"$VAULTCTL_REAL_GIT" "$@"
+status=$?
+is_managed_status=false
+for arg in "$@"; do
+	if [ "$arg" = "--porcelain=v2" ]; then
+		is_managed_status=true
+	fi
+done
+if [ "$status" -eq 0 ] && [ "$PWD" = "$VAULTCTL_VAULT_ROOT" ] && [ "$is_managed_status" = true ]; then
+	count=0
+	if [ -f "$VAULTCTL_STATUS_COUNT" ]; then
+		count=$(cat "$VAULTCTL_STATUS_COUNT")
+	fi
+	count=$((count + 1))
+	printf '%s' "$count" > "$VAULTCTL_STATUS_COUNT"
+	if [ "$count" -eq 2 ]; then
+		printf '%s' "$VAULTCTL_MUTATION_CONTENT" > "$VAULTCTL_MUTATION_PATH"
+	fi
+fi
+exit "$status"
+`)
+	if err := os.Chmod(wrapper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VAULTCTL_REAL_GIT", realGit)
+	t.Setenv("VAULTCTL_VAULT_ROOT", vaultRoot)
+	t.Setenv("VAULTCTL_STATUS_COUNT", countPath)
+	t.Setenv("VAULTCTL_MUTATION_PATH", mutationPath)
+	t.Setenv("VAULTCTL_MUTATION_CONTENT", mutationContent)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func writeExternalManifest(t testing.TB, vault string, mappings string) {
@@ -73,6 +153,9 @@ func TestRefreshExternalDocsThinPath(t *testing.T) {
 	if err := json.Unmarshal(stateContent, &decoded); err != nil {
 		t.Fatalf("state is not JSON: %v", err)
 	}
+	if got, ok := decoded["version"].(float64); !ok || got != 2 {
+		t.Fatalf("generated state version = %#v, want 2", decoded["version"])
+	}
 	if !strings.HasSuffix(string(stateContent), "\n") {
 		t.Fatal("generated state does not end with a newline")
 	}
@@ -90,6 +173,48 @@ func TestRefreshExternalDocsThinPath(t *testing.T) {
 	}
 	if got := strings.TrimSpace(runGit(t, client, "show", "--format=", "--name-only", "HEAD")); got != ".vaultctl/external-docs-state.json\nexternal/project/guide.md" {
 		t.Fatalf("refresh commit paths = %q, want only managed paths", got)
+	}
+}
+
+// AC-3: version 2 state serializes the complete normalized ownership tree in
+// stable order, including the destination root and materialized directories.
+func TestRefreshExternalDocsSerializesCompleteOwnershipInventory(t *testing.T) {
+	_, client, _ := setupRemoteFixture(t)
+	sourceRoot, sourceRepo, sourceRemote := setupExternalSource(t)
+	if err := os.MkdirAll(filepath.Join(sourceRepo, "docs", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commitTestFile(t, sourceRepo, "docs/nested/reference.md", "Reference\n", "add nested reference")
+	runGit(t, sourceRepo, "push", "origin", "main")
+	writeExternalManifest(t, client, `[{"source":"docs","destination":"external/project"}]`)
+	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatal(err)
+	}
+
+	commit := strings.TrimSpace(runGit(t, sourceRemote, "rev-parse", "main"))
+	want := fmt.Sprintf(`{
+  "version": 2,
+  "sources": [
+    {
+      "id": "docs",
+      "resolved_commit": %q,
+      "owned_paths": [
+        "external/project",
+        "external/project/guide.md",
+        "external/project/nested",
+        "external/project/nested/reference.md"
+      ]
+    }
+  ]
+}
+`, commit)
+	got, err := os.ReadFile(filepath.Join(client, filepath.FromSlash(externalStatePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("generated state = %s, want complete deterministic inventory %s", got, want)
 	}
 }
 
@@ -191,6 +316,200 @@ func TestRefreshExternalDocsRestoresPrecommitFailure(t *testing.T) {
 	}
 }
 
+// AC-6: a changed ownership boundary between the prefetch baseline and the
+// immediate prewrite revalidation fails before projection mutation.
+func TestRefreshExternalDocsRejectsOwnershipChangeBeforeProjectionWrite(t *testing.T) {
+	_, client, _ := setupRemoteFixture(t)
+	sourceRoot, sourceRepo, sourceRemote := setupExternalSource(t)
+	writeExternalManifest(t, client, `[{"source":"docs","destination":"external/project"}]`)
+	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatal(err)
+	}
+
+	commitTestFile(t, sourceRepo, "docs/guide.md", "Guide two\n", "source update")
+	runGit(t, sourceRepo, "push", "origin", "main")
+	mutationPath := filepath.Join(client, "external", "project", "unexpected.md")
+	installGitFetchMutation(t, sourceRepo, mutationPath, "created during refresh\n")
+	beforeHead := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD"))
+	beforeState, err := os.ReadFile(filepath.Join(client, filepath.FromSlash(externalStatePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = app.refreshExternalDocs()
+	if err == nil || !strings.Contains(err.Error(), `relative path "unexpected.md"`) || !strings.Contains(err.Error(), "unexpected file") {
+		t.Fatalf("refresh error = %v, want prewrite ownership boundary refusal", err)
+	}
+	if got := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD")); got != beforeHead {
+		t.Fatalf("HEAD changed from %s to %s after baseline refusal", beforeHead, got)
+	}
+	afterState, err := os.ReadFile(filepath.Join(client, filepath.FromSlash(externalStatePath)))
+	if err != nil || string(afterState) != string(beforeState) {
+		t.Fatalf("generated state changed after baseline refusal, got %q, err = %v", afterState, err)
+	}
+	content, err := os.ReadFile(filepath.Join(client, "external", "project", "guide.md"))
+	if err != nil || string(content) != "Guide one\n" {
+		t.Fatalf("projection after baseline refusal = %q, err = %v, want prior projection preserved", content, err)
+	}
+	if unexpected, err := os.ReadFile(mutationPath); err != nil || string(unexpected) != "created during refresh\n" {
+		t.Fatalf("fetch-time boundary mutation = %q, err = %v, want mutation to remain unprojected", unexpected, err)
+	}
+	wantCommit := strings.TrimSpace(runGit(t, sourceRemote, "rev-parse", "main"))
+	fetchHead := strings.TrimSpace(runGit(t, sourceRepo, "rev-parse", "--git-path", "FETCH_HEAD"))
+	if !filepath.IsAbs(fetchHead) {
+		fetchHead = filepath.Join(sourceRepo, fetchHead)
+	}
+	gotCommit, err := readFetchedCommit(sourceRepo, fetchHead)
+	if err != nil || gotCommit != wantCommit {
+		t.Fatalf("FETCH_HEAD = %q, err = %v, want fetched source commit %q", gotCommit, err, wantCommit)
+	}
+}
+
+// AC-5 and AC-7: a path created after the final ownership scan is not absorbed
+// by directory path authorization during staging.
+func TestRefreshExternalDocsDoesNotStageUnownedDescendantAfterBaseline(t *testing.T) {
+	_, client, _ := setupRemoteFixture(t)
+	sourceRoot, sourceRepo, _ := setupExternalSource(t)
+	writeExternalManifest(t, client, `[{"source":"docs","destination":"external/project"}]`)
+	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatal(err)
+	}
+
+	commitTestFile(t, sourceRepo, "docs/guide.md", "Guide two\n", "source update")
+	runGit(t, sourceRepo, "push", "origin", "main")
+	unownedPath := filepath.Join(client, "external", "project", "unexpected.md")
+	installGitManagedStateMutation(t, client, unownedPath, "unowned after baseline\n")
+
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatalf("refreshExternalDocs: %v", err)
+	}
+	if content, err := os.ReadFile(unownedPath); err != nil || string(content) != "unowned after baseline\n" {
+		t.Fatalf("unowned descendant = %q, err = %v, want unchanged", content, err)
+	}
+	if got := strings.TrimSpace(runGit(t, client, "show", "--format=", "--name-only", "HEAD")); got != ".vaultctl/external-docs-state.json\nexternal/project/guide.md" {
+		t.Fatalf("refresh commit paths = %q, want only exact refresh files", got)
+	}
+	if status := runGit(t, client, "status", "--porcelain"); !strings.Contains(status, "?? external/project/unexpected.md") {
+		t.Fatalf("status = %q, want unowned descendant left untracked", status)
+	}
+}
+
+// AC-5 and AC-8: recoverable failure after stale removal restores the prior
+// projection, generated state, refresh-owned index entries, and other work.
+func TestRefreshExternalDocsRestoresStaleProjectionAfterCommitFailure(t *testing.T) {
+	_, client, _ := setupRemoteFixture(t)
+	sourceRoot, sourceRepo, _ := setupExternalSource(t)
+	commitTestFile(t, sourceRepo, "docs/old.md", "Old projection\n", "add stale candidate")
+	runGit(t, sourceRepo, "push", "origin", "main")
+	writeExternalManifest(t, client, `[{"source":"docs","destination":"external/project"}]`)
+	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatal(err)
+	}
+
+	guidePath := filepath.Join(client, "external", "project", "guide.md")
+	oldPath := filepath.Join(client, "external", "project", "old.md")
+	beforeGuide, err := os.ReadFile(guidePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeState, err := os.ReadFile(filepath.Join(client, filepath.FromSlash(externalStatePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(sourceRepo, "docs", "old.md")); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(sourceRepo, "docs", "guide.md"), "Guide two\n")
+	runGit(t, sourceRepo, "add", "docs")
+	runGit(t, sourceRepo, "commit", "-m", "remove stale projection")
+	runGit(t, sourceRepo, "push", "origin", "main")
+
+	writeTestFile(t, filepath.Join(client, "unrelated-staged.md"), "keep staged\n")
+	runGit(t, client, "add", "unrelated-staged.md")
+	writeTestFile(t, filepath.Join(client, "unrelated-unstaged.md"), "keep unstaged\n")
+	beforeCached := runGit(t, client, "diff", "--cached", "--name-status")
+	beforeStatus := runGit(t, client, "status", "--porcelain")
+	hook := filepath.Join(client, ".git", "hooks", "pre-commit")
+	writeTestFile(t, hook, "#!/bin/sh\nprintf '%s\\n' 'stale removal commit failure' >&2\nexit 42\n")
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err = app.refreshExternalDocs()
+	if err == nil || !strings.Contains(err.Error(), "stale removal commit failure") {
+		t.Fatalf("refresh error = %v, want commit failure after stale removal", err)
+	}
+	afterGuide, err := os.ReadFile(guidePath)
+	if err != nil || string(afterGuide) != string(beforeGuide) {
+		t.Fatalf("guide after rollback = %q, err = %v, want %q", afterGuide, err, beforeGuide)
+	}
+	afterOld, err := os.ReadFile(oldPath)
+	if err != nil || string(afterOld) != "Old projection\n" {
+		t.Fatalf("stale file after rollback = %q, err = %v, want prior projection", afterOld, err)
+	}
+	afterState, err := os.ReadFile(filepath.Join(client, filepath.FromSlash(externalStatePath)))
+	if err != nil || string(afterState) != string(beforeState) {
+		t.Fatalf("state after rollback = %q, err = %v, want prior generated state", afterState, err)
+	}
+	if got := runGit(t, client, "diff", "--cached", "--name-status"); got != beforeCached {
+		t.Fatalf("cached paths after rollback = %q, want %q", got, beforeCached)
+	}
+	if got := runGit(t, client, "status", "--porcelain"); got != beforeStatus {
+		t.Fatalf("status after rollback = %q, want %q", got, beforeStatus)
+	}
+}
+
+// AC-8: rollback restores exact projected paths but does not remove an
+// unowned descendant created after the projection snapshot.
+func TestRefreshExternalDocsRollbackLeavesUnownedDescendant(t *testing.T) {
+	_, client, _ := setupRemoteFixture(t)
+	sourceRoot, sourceRepo, _ := setupExternalSource(t)
+	writeExternalManifest(t, client, `[{"source":"docs/guide.md","destination":"external/project/guide.md"}]`)
+	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatal(err)
+	}
+
+	commitTestFile(t, sourceRepo, "docs/guide.md", "Guide two\n", "source update")
+	runGit(t, sourceRepo, "push", "origin", "main")
+	guidePath := filepath.Join(client, "external", "project", "guide.md")
+	beforeGuide, err := os.ReadFile(guidePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(client, "unrelated-staged.md"), "keep staged\n")
+	runGit(t, client, "add", "unrelated-staged.md")
+	writeTestFile(t, filepath.Join(client, "unrelated-unstaged.md"), "keep unstaged\n")
+	beforeCached := runGit(t, client, "diff", "--cached", "--name-status")
+	unownedPath := filepath.Join(client, "external", "project", "unexpected.md")
+	hook := filepath.Join(client, ".git", "hooks", "pre-commit")
+	writeTestFile(t, hook, "#!/bin/sh\nprintf '%s\\n' 'unowned during rollback' > external/project/unexpected.md\nprintf '%s\\n' 'rollback commit failure' >&2\nexit 42\n")
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err = app.refreshExternalDocs()
+	if err == nil || !strings.Contains(err.Error(), "rollback commit failure") {
+		t.Fatalf("refresh error = %v, want commit failure", err)
+	}
+	if content, err := os.ReadFile(guidePath); err != nil || string(content) != string(beforeGuide) {
+		t.Fatalf("guide after rollback = %q, err = %v, want %q", content, err, beforeGuide)
+	}
+	if content, err := os.ReadFile(unownedPath); err != nil || string(content) != "unowned during rollback\n" {
+		t.Fatalf("unowned descendant after rollback = %q, err = %v, want unchanged", content, err)
+	}
+	if got := runGit(t, client, "diff", "--cached", "--name-status"); got != beforeCached {
+		t.Fatalf("cached paths after rollback = %q, want %q", got, beforeCached)
+	}
+	status := runGit(t, client, "status", "--porcelain")
+	if !strings.Contains(status, "?? external/project/unexpected.md") || !strings.Contains(status, "A  unrelated-staged.md") || !strings.Contains(status, "?? unrelated-unstaged.md") {
+		t.Fatalf("status after rollback = %q, want unrelated work and unowned descendant preserved", status)
+	}
+}
+
 // AC-9: an uncertain post commit inspection enters manual recovery and keeps the refresh commit.
 func TestRefreshExternalDocsReportsManualRecoveryWhenPostCommitInspectionFails(t *testing.T) {
 	_, client, _ := setupRemoteFixture(t)
@@ -227,7 +546,7 @@ func TestRefreshExternalDocsReportsManualRecoveryWhenPostCommitInspectionFails(t
 	}
 }
 
-func TestRefreshExternalDocsRollbackPreservesIgnoredAndEmptyContent(t *testing.T) {
+func TestRefreshExternalDocsRejectsUnexpectedIgnoredAndEmptyContent(t *testing.T) {
 	_, client, _ := setupRemoteFixture(t)
 	sourceRoot, _, _ := setupExternalSource(t)
 	writeExternalManifest(t, client, `[{"source":"docs","destination":"external/project"}]`)
@@ -244,15 +563,13 @@ func TestRefreshExternalDocsRollbackPreservesIgnoredAndEmptyContent(t *testing.T
 		t.Fatal(err)
 	}
 
-	hook := filepath.Join(client, ".git", "hooks", "pre-commit")
-	writeTestFile(t, hook, "#!/bin/sh\nprintf '%s\\n' 'simulated refresh commit failure' >&2\nexit 42\n")
-	if err := os.Chmod(hook, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
+	beforeHead := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD"))
 	err := app.refreshExternalDocs()
-	if err == nil || !strings.Contains(err.Error(), "simulated refresh commit failure") {
-		t.Fatalf("refresh error = %v, want simulated commit failure", err)
+	if err == nil || !strings.Contains(err.Error(), "unexpected directory") {
+		t.Fatalf("refresh error = %v, want unexpected directory refusal", err)
+	}
+	if got := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD")); got != beforeHead {
+		t.Fatalf("HEAD changed from %s to %s after ownership refusal", beforeHead, got)
 	}
 	content, err := os.ReadFile(filepath.Join(managed, "ignored.md"))
 	if err != nil || string(content) != "keep ignored content\n" {
@@ -448,8 +765,8 @@ func TestRefreshExternalDocsRejectsRemovedSourceFromState(t *testing.T) {
 	}
 }
 
-// AC-7: a source changing from a directory to a file cannot replace an existing directory destination.
-func TestRefreshExternalDocsRejectsDestinationTypeChange(t *testing.T) {
+// AC-5: a proven owned destination may change from a directory to a file.
+func TestRefreshExternalDocsAllowsDestinationTypeChange(t *testing.T) {
 	_, client, _ := setupRemoteFixture(t)
 	sourceRoot, sourceRepo, _ := setupExternalSource(t)
 	writeExternalManifest(t, client, `[{"source":"docs","destination":"external/project"}]`)
@@ -466,16 +783,186 @@ func TestRefreshExternalDocsRejectsDestinationTypeChange(t *testing.T) {
 	runGit(t, sourceRepo, "commit", "-m", "replace source directory")
 	runGit(t, sourceRepo, "push", "origin", "main")
 
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatalf("refreshExternalDocs after type change: %v", err)
+	}
+	if afterHead := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD")); afterHead == beforeHead {
+		t.Fatalf("HEAD did not change after destination type change")
+	}
+	content, err := os.ReadFile(filepath.Join(client, "external", "project"))
+	if err != nil || string(content) != "the source path is now a file\n" {
+		t.Fatalf("replacement projection = %q, err = %v, want source file content", content, err)
+	}
+}
+
+func TestRefreshExternalDocsRejectsLegacyStateBeforeSourceFetch(t *testing.T) {
+	_, client, _ := setupRemoteFixture(t)
+	sourceRoot, sourceRepo, _ := setupExternalSource(t)
+	writeExternalManifest(t, client, `[{"source":"docs/guide.md","destination":"external/project/guide.md"}]`)
+	commit := strings.TrimSpace(runGit(t, sourceRepo, "rev-parse", "HEAD"))
+	statePath := filepath.Join(client, filepath.FromSlash(externalStatePath))
+	writeTestFile(t, statePath, `{"version":1,"sources":[{"id":"docs","resolved_commit":"`+commit+`","owned_paths":["external/project/guide.md"]}]}`+"\n")
+	runGit(t, client, "add", filepath.FromSlash(externalStatePath))
+	runGit(t, client, "commit", "-m", "add legacy external state")
+	fetchHead := strings.TrimSpace(runGit(t, sourceRepo, "rev-parse", "--git-path", "FETCH_HEAD"))
+	if !filepath.IsAbs(fetchHead) {
+		fetchHead = filepath.Join(sourceRepo, fetchHead)
+	}
+	beforeFetch, beforeErr := os.ReadFile(fetchHead)
+
+	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
 	err := app.refreshExternalDocs()
-	if err == nil || !strings.Contains(err.Error(), "file mapping destination") {
-		t.Fatalf("refresh error = %v, want destination type refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "requires migration") {
+		t.Fatalf("refresh error = %v, want migration refusal", err)
+	}
+	afterFetch, afterErr := os.ReadFile(fetchHead)
+	if (beforeErr == nil) != (afterErr == nil) || string(beforeFetch) != string(afterFetch) {
+		t.Fatalf("source FETCH_HEAD changed while rejecting legacy state")
+	}
+}
+
+func TestRefreshExternalDocsRejectsUnexpectedContentBeforeSourceFetch(t *testing.T) {
+	_, client, _ := setupRemoteFixture(t)
+	sourceRoot, sourceRepo, _ := setupExternalSource(t)
+	writeExternalManifest(t, client, `[{"source":"docs","destination":"external/project"}]`)
+	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(client, ".gitignore"), "external/project/a.md\n")
+	runGit(t, client, "add", ".gitignore")
+	runGit(t, client, "commit", "-m", "ignore unexpected projection file")
+	writeTestFile(t, filepath.Join(client, "external", "project", "z.md"), "unexpected z\n")
+	writeTestFile(t, filepath.Join(client, "external", "project", "a.md"), "unexpected a\n")
+	fetchHead := strings.TrimSpace(runGit(t, sourceRepo, "rev-parse", "--git-path", "FETCH_HEAD"))
+	if !filepath.IsAbs(fetchHead) {
+		fetchHead = filepath.Join(sourceRepo, fetchHead)
+	}
+	beforeFetch, err := os.ReadFile(fetchHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = app.refreshExternalDocs()
+	if err == nil || !strings.Contains(err.Error(), `relative path "a.md"`) || !strings.Contains(err.Error(), "unexpected file") {
+		t.Fatalf("refresh error = %v, want first deterministic unexpected file", err)
+	}
+	afterFetch, err := os.ReadFile(fetchHead)
+	if err != nil || string(afterFetch) != string(beforeFetch) {
+		t.Fatalf("source FETCH_HEAD changed before unexpected content refusal")
+	}
+}
+
+// AC-2: a missing previously owned path fails before source fetch or projection mutation.
+func TestRefreshExternalDocsRejectsMissingOwnedPathBeforeSourceFetch(t *testing.T) {
+	_, client, _ := setupRemoteFixture(t)
+	sourceRoot, _, _ := setupExternalSource(t)
+	writeExternalManifest(t, client, `[{"source":"docs/guide.md","destination":"external/project/guide.md"}]`)
+	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatalf("initial refreshExternalDocs: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(client, "external", "project", "guide.md")); err != nil {
+		t.Fatal(err)
+	}
+	beforeHead := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD"))
+	fetchHead := strings.TrimSpace(runGit(t, filepath.Join(sourceRoot, "project"), "rev-parse", "--git-path", "FETCH_HEAD"))
+	if !filepath.IsAbs(fetchHead) {
+		fetchHead = filepath.Join(sourceRoot, "project", fetchHead)
+	}
+	beforeFetch, err := os.ReadFile(fetchHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = app.refreshExternalDocs()
+	if err == nil || !strings.Contains(err.Error(), `relative path "."`) || !strings.Contains(err.Error(), "missing owned path") {
+		t.Fatalf("refresh error = %v, want missing owned path refusal", err)
 	}
 	if afterHead := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD")); afterHead != beforeHead {
-		t.Fatalf("HEAD changed from %s to %s after destination type refusal", beforeHead, afterHead)
+		t.Fatalf("HEAD changed from %s to %s after missing ownership refusal", beforeHead, afterHead)
 	}
-	content, err := os.ReadFile(filepath.Join(client, "external", "project", "guide.md"))
-	if err != nil || string(content) != "Guide one\n" {
-		t.Fatalf("existing projection = %q, err = %v, want unchanged content", content, err)
+	afterFetch, err := os.ReadFile(fetchHead)
+	if err != nil || string(afterFetch) != string(beforeFetch) {
+		t.Fatalf("source FETCH_HEAD changed before missing ownership refusal")
+	}
+}
+
+// AC-2: special filesystem entries fail before source fetch or projection mutation.
+func TestRefreshExternalDocsRejectsSpecialEntryBeforeSourceFetch(t *testing.T) {
+	_, client, _ := setupRemoteFixture(t)
+	sourceRoot, sourceRepo, _ := setupExternalSource(t)
+	writeExternalManifest(t, client, `[{"source":"docs","destination":"external/project"}]`)
+	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatalf("initial refreshExternalDocs: %v", err)
+	}
+
+	special := filepath.Join(client, "external", "project", "special")
+	if err := syscall.Mkfifo(special, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fetchHead := strings.TrimSpace(runGit(t, sourceRepo, "rev-parse", "--git-path", "FETCH_HEAD"))
+	if !filepath.IsAbs(fetchHead) {
+		fetchHead = filepath.Join(sourceRepo, fetchHead)
+	}
+	beforeFetch, err := os.ReadFile(fetchHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = app.refreshExternalDocs()
+	if err == nil || !strings.Contains(err.Error(), `relative path "special"`) || !strings.Contains(err.Error(), "special entry") {
+		t.Fatalf("refresh error = %v, want special entry refusal", err)
+	}
+	afterFetch, err := os.ReadFile(fetchHead)
+	if err != nil || string(afterFetch) != string(beforeFetch) {
+		t.Fatalf("source FETCH_HEAD changed before special entry refusal")
+	}
+	if _, err := os.Stat(special); err != nil {
+		t.Fatalf("special entry was removed after ownership refusal: %v", err)
+	}
+}
+
+// AC-2: a version 2 inventory that disagrees with the committed tree fails
+// before source fetch, even when the current worktree still has the owned file.
+func TestRefreshExternalDocsRejectsCommittedProjectionMismatchBeforeSourceFetch(t *testing.T) {
+	_, client, _ := setupRemoteFixture(t)
+	sourceRoot, sourceRepo, _ := setupExternalSource(t)
+	writeExternalManifest(t, client, `[{"source":"docs/guide.md","destination":"external/project/guide.md"}]`)
+	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTestFile(t, filepath.Join(client, ".gitignore"), "external/project/guide.md\n")
+	runGit(t, client, "rm", "--cached", "--", "external/project/guide.md")
+	runGit(t, client, "add", ".gitignore")
+	runGit(t, client, "commit", "-m", "remove committed projection entry")
+	beforeHead := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD"))
+	fetchHead := strings.TrimSpace(runGit(t, sourceRepo, "rev-parse", "--git-path", "FETCH_HEAD"))
+	if !filepath.IsAbs(fetchHead) {
+		fetchHead = filepath.Join(sourceRepo, fetchHead)
+	}
+	beforeFetch, err := os.ReadFile(fetchHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = app.refreshExternalDocs()
+	if err == nil || !strings.Contains(err.Error(), "committed projection mismatch") {
+		t.Fatalf("refresh error = %v, want committed projection mismatch", err)
+	}
+	if got := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD")); got != beforeHead {
+		t.Fatalf("HEAD changed from %s to %s before committed projection refusal", beforeHead, got)
+	}
+	afterFetch, err := os.ReadFile(fetchHead)
+	if err != nil || string(afterFetch) != string(beforeFetch) {
+		t.Fatalf("source FETCH_HEAD changed before committed projection refusal")
+	}
+	if content, err := os.ReadFile(filepath.Join(client, "external", "project", "guide.md")); err != nil || string(content) != "Guide one\n" {
+		t.Fatalf("current projection = %q, err = %v, want unchanged worktree content", content, err)
 	}
 }
 
@@ -692,6 +1179,49 @@ func TestRefreshExternalDocsRejectsSymlinkedDestinationAncestry(t *testing.T) {
 	}
 }
 
+// AC-2: a symlink anywhere inside an owned destination fails before fetch.
+func TestRefreshExternalDocsRejectsSymlinkInsideOwnedDestinationBeforeSourceFetch(t *testing.T) {
+	_, client, _ := setupRemoteFixture(t)
+	sourceRoot, sourceRepo, _ := setupExternalSource(t)
+	writeExternalManifest(t, client, `[{"source":"docs","destination":"external/project"}]`)
+	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
+	if err := app.refreshExternalDocs(); err != nil {
+		t.Fatal(err)
+	}
+
+	outside := t.TempDir()
+	sentinel := filepath.Join(outside, "sentinel.md")
+	writeTestFile(t, sentinel, "untouched\n")
+	symlink := filepath.Join(client, "external", "project", "unexpected.md")
+	if err := os.Symlink(sentinel, symlink); err != nil {
+		t.Fatal(err)
+	}
+	beforeHead := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD"))
+	fetchHead := strings.TrimSpace(runGit(t, sourceRepo, "rev-parse", "--git-path", "FETCH_HEAD"))
+	if !filepath.IsAbs(fetchHead) {
+		fetchHead = filepath.Join(sourceRepo, fetchHead)
+	}
+	beforeFetch, err := os.ReadFile(fetchHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = app.refreshExternalDocs()
+	if err == nil || !strings.Contains(err.Error(), `relative path "unexpected.md"`) || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("refresh error = %v, want in-destination symlink refusal", err)
+	}
+	if got := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD")); got != beforeHead {
+		t.Fatalf("HEAD changed from %s to %s after symlink refusal", beforeHead, got)
+	}
+	afterFetch, err := os.ReadFile(fetchHead)
+	if err != nil || string(afterFetch) != string(beforeFetch) {
+		t.Fatalf("source FETCH_HEAD changed before in-destination symlink refusal")
+	}
+	if content, err := os.ReadFile(sentinel); err != nil || string(content) != "untouched\n" {
+		t.Fatalf("outside sentinel = %q, err = %v, want untouched", content, err)
+	}
+}
+
 // AC-3 and AC-4: unsupported source links are rejected before projection.
 func TestRefreshExternalDocsRejectsSelectedSourceSymlink(t *testing.T) {
 	_, client, _ := setupRemoteFixture(t)
@@ -731,7 +1261,7 @@ func TestParseExternalStateRejectsInvalidIdentifiers(t *testing.T) {
 		{name: "control character", idJSON: `"\u0001"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			data := `{"version":1,"sources":[{"id":` + tt.idJSON + `,"resolved_commit":"` + strings.Repeat("0", 40) + `","owned_paths":["docs"]}]}`
+			data := `{"version":2,"sources":[{"id":` + tt.idJSON + `,"resolved_commit":"` + strings.Repeat("0", 40) + `","owned_paths":["docs"]}]}`
 			if _, err := parseExternalState([]byte(data)); err == nil {
 				t.Fatalf("parseExternalState accepted invalid identifier %s", tt.idJSON)
 			}
@@ -775,18 +1305,23 @@ func TestParseExternalStateRequiresCanonicalOrdering(t *testing.T) {
 	}{
 		{
 			name: "source identifiers are sorted",
-			data: `{"version":1,"sources":[` + stateSource("z", `["external/z"]`) + `,` + stateSource("a", `["external/a"]`) + `]}`,
+			data: `{"version":2,"sources":[` + stateSource("z", `["external/z"]`) + `,` + stateSource("a", `["external/a"]`) + `]}`,
 			want: "sorted by identifier",
 		},
 		{
 			name: "owned paths are sorted",
-			data: `{"version":1,"sources":[` + stateSource("docs", `["external/z","external/a"]`) + `]}`,
+			data: `{"version":2,"sources":[` + stateSource("docs", `["external/z","external/a"]`) + `]}`,
 			want: "sorted and normalized",
 		},
 		{
 			name: "owned paths are unique",
-			data: `{"version":1,"sources":[` + stateSource("docs", `["external/a","external/a"]`) + `]}`,
+			data: `{"version":2,"sources":[` + stateSource("docs", `["external/a","external/a"]`) + `]}`,
 			want: "sorted and normalized",
+		},
+		{
+			name: "owned paths include directory ancestors",
+			data: `{"version":2,"sources":[` + stateSource("docs", `["external","external/a/b"]`) + `]}`,
+			want: "missing directory ancestor",
 		},
 	}
 	for _, tt := range tests {
@@ -921,5 +1456,114 @@ func TestRefreshExternalDocsRejectsDirtyManagedDestination(t *testing.T) {
 	}
 	if string(afterFetch) != string(beforeFetch) {
 		t.Fatal("source FETCH_HEAD changed before dirty destination validation")
+	}
+}
+
+// AC-2: the ownership validator accepts only the exact recorded tree and
+// reports the first violation in normalized path order.
+func TestValidateScannedDestinationEnforcesExclusiveOwnership(t *testing.T) {
+	tests := []struct {
+		name     string
+		actual   []externalScannedPath
+		expected []string
+		wantErr  string
+	}{
+		{
+			name: "exact owned tree",
+			actual: []externalScannedPath{
+				{Path: "external/project", Kind: "directory"},
+				{Path: "external/project/guide.md", Kind: "file"},
+			},
+			expected: []string{"external/project", "external/project/guide.md"},
+		},
+		{
+			name:     "absent new destination",
+			actual:   []externalScannedPath{{Path: "external/project", Kind: "absent"}},
+			expected: nil,
+		},
+		{
+			name:   "reports missing owned path",
+			actual: []externalScannedPath{{Path: "external/project", Kind: "directory"}},
+			expected: []string{
+				"external/project",
+				"external/project/guide.md",
+			},
+			wantErr: `relative path "guide.md": missing owned path`,
+		},
+		{
+			name: "reports first unexpected path lexically",
+			actual: []externalScannedPath{
+				{Path: "external/project", Kind: "directory"},
+				{Path: "external/project/z.md", Kind: "file"},
+				{Path: "external/project/a.md", Kind: "file"},
+				{Path: "external/project/guide.md", Kind: "file"},
+			},
+			expected: []string{
+				"external/project",
+				"external/project/guide.md",
+			},
+			wantErr: `relative path "a.md": unexpected file`,
+		},
+		{
+			name: "rejects unexpected directory",
+			actual: []externalScannedPath{
+				{Path: "external/project", Kind: "directory"},
+				{Path: "external/project/empty", Kind: "directory"},
+			},
+			expected: []string{"external/project", "external/project/guide.md"},
+			wantErr:  `relative path "empty": unexpected directory`,
+		},
+		{
+			name: "rejects symlink",
+			actual: []externalScannedPath{
+				{Path: "external/project", Kind: "directory"},
+				{Path: "external/project/link", Kind: "symlink"},
+				{Path: "external/project/z.md", Kind: "file"},
+			},
+			expected: []string{"external/project", "external/project/z.md"},
+			wantErr:  `relative path "link": symlink`,
+		},
+		{
+			name: "rejects special entry",
+			actual: []externalScannedPath{
+				{Path: "external/project", Kind: "directory"},
+				{Path: "external/project/socket", Kind: "special"},
+				{Path: "external/project/z.md", Kind: "file"},
+			},
+			expected: []string{"external/project", "external/project/z.md"},
+			wantErr:  `relative path "socket": special entry`,
+		},
+		{
+			name:     "rejects owned file replaced by directory",
+			actual:   []externalScannedPath{{Path: "external/project", Kind: "directory"}},
+			expected: []string{"external/project"},
+			wantErr:  `relative path ".": ownership mismatch`,
+		},
+		{
+			name: "rejects owned directory replaced by file",
+			actual: []externalScannedPath{
+				{Path: "external/project", Kind: "file"},
+			},
+			expected: []string{
+				"external/project",
+				"external/project/guide.md",
+			},
+			wantErr: `relative path ".": ownership mismatch`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateScannedDestination("external/project", tt.actual, tt.expected)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateScannedDestination error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateScannedDestination error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }
