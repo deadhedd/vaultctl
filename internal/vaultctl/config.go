@@ -17,11 +17,12 @@ const (
 // Config describes either a normal client clone or the server's split
 // bare-repository/worktree layout.
 type Config struct {
-	Mode      string `json:"mode"`
-	VaultPath string `json:"vault_path,omitempty"`
-	BareRepo  string `json:"bare_repo,omitempty"`
-	Worktree  string `json:"worktree,omitempty"`
-	RunAsUser string `json:"run_as_user,omitempty"`
+	Mode       string `json:"mode"`
+	VaultPath  string `json:"vault_path,omitempty"`
+	SourceRoot string `json:"source_root,omitempty"`
+	BareRepo   string `json:"bare_repo,omitempty"`
+	Worktree   string `json:"worktree,omitempty"`
+	RunAsUser  string `json:"run_as_user,omitempty"`
 }
 
 func defaultConfigPath() (string, error) {
@@ -90,6 +91,9 @@ func (c Config) validate() error {
 		}
 		if c.VaultPath != "" {
 			return fmt.Errorf("vault_path is a client-mode field")
+		}
+		if c.SourceRoot != "" {
+			return fmt.Errorf("source_root is a client-mode field")
 		}
 	default:
 		return fmt.Errorf("mode must be %q or %q", ModeClient, ModeServer)

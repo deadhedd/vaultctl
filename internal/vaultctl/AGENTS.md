@@ -13,6 +13,7 @@ This package contains the command line behavior for vaultctl. It parses commands
 | `config.go` | Platform config paths, strict JSON decoding, and mode validation |
 | `git.go` | The external Git and OpenBSD `doas` process boundary |
 | `sync.go` | Upstream checks, history classification, synchronization, and conflict recovery |
+| `external_docs.go` | Client sync refresh, projection, ownership state, and refresh recovery for selected external documentation |
 | `*_test.go` | Parser, configuration, process boundary, save, sync, and fixture tests |
 
 ## Conventions
@@ -20,6 +21,7 @@ This package contains the command line behavior for vaultctl. It parses commands
 - Pass Git arguments as slices to `exec.Command`. Do not build shell command strings.
 - Client mode uses the configured vault as the process directory. Server mode supplies explicit bare repository and worktree arguments.
 - Check the current repository state before changing it. A sync first checks the worktree, unfinished operations, conflicts, and upstream configuration.
+- A normal client sync refreshes selected external documentation only when the tracked `.vaultctl/external-docs.json` manifest exists. It uses the configured `source_root`, explicit source remotes and branches, and one isolated refresh commit. Server mode and sync continuation or abort do not run refresh.
 - Keep synchronization outcomes explicit: equal, ahead, behind, or diverged. Diverged histories use rebase by default or merge only with `--merge`.
 - Report conflicts and require the user to resolve them. Continue only after unresolved index entries are gone.
 

@@ -105,7 +105,7 @@ Commands:
   save            stage and commit all vault changes
   sync            conservatively synchronize a client clone
   sync --continue continue a conflicted rebase or merge, then push
-  sync --abort    abort an in-progress rebase, merge, or cherry-pick
+  sync --abort    abort an in-progress rebase, merge, cherry-pick, or revert
   sync --merge    merge instead of rebasing when histories diverge
   doctor          check configuration and repository basics
   git -- ARGS     run Git directly in the configured vault context

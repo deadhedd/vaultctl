@@ -236,3 +236,96 @@ func TestSyncAbortWithNoOperationSucceeds(t *testing.T) {
 		t.Fatalf("unexpected output:\n%s", stdout.String())
 	}
 }
+
+func TestSyncAbortHandlesRevertAndUnknownSequencer(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(*testing.T, string)
+		wantError string
+	}{
+		{
+			name: "revert",
+			setup: func(t *testing.T, repo string) {
+				runGit(t, repo, "switch", "-c", "topic")
+				commitTestFile(t, repo, "note.md", "topic\n", "topic")
+				topicCommit := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+				runGit(t, repo, "switch", "main")
+				commitTestFile(t, repo, "note.md", "main\n", "main")
+				runGitFailure(t, repo, "revert", "--no-edit", topicCommit)
+			},
+		},
+		{
+			name: "unknown sequencer",
+			setup: func(t *testing.T, repo string) {
+				path := strings.TrimSpace(runGit(t, repo, "rev-parse", "--git-path", "sequencer"))
+				if !filepath.IsAbs(path) {
+					path = filepath.Join(repo, path)
+				}
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatalf("create sequencer state: %v", err)
+				}
+			},
+			wantError: "an unfinished Git sequencer is in progress",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := initTestRepo(t)
+			tt.setup(t, repo)
+			app, stdout, _ := testApp(Config{Mode: ModeClient, VaultPath: repo})
+
+			err := app.sync([]string{"--abort"})
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("abort error = %v, want %q", err, tt.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("abort revert: %v\noutput:\n%s", err, stdout.String())
+			}
+			if !strings.Contains(stdout.String(), "Aborting revert") {
+				t.Fatalf("abort output = %q, want revert message", stdout.String())
+			}
+			operation, err := app.detectOperation()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if operation.any() {
+				t.Fatalf("operation remains after abort: %#v", operation)
+			}
+		})
+	}
+}
+
+func TestSyncContinuationAndAbortSkipExternalDocumentationRefresh(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "continue", args: []string{"--continue"}, want: "no rebase or merge is in progress"},
+		{name: "abort", args: []string{"--abort"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, client, _ := setupRemoteFixture(t)
+			writeExternalManifest(t, client, `[{"source":"docs/guide.md","destination":"external/project/guide.md"}]`)
+			app, stdout, _ := testApp(Config{Mode: ModeClient, VaultPath: client})
+
+			err := app.sync(tt.args)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("sync(%v): %v", tt.args, err)
+				}
+				if !strings.Contains(stdout.String(), "nothing to abort") {
+					t.Fatalf("sync(%v) output = %q, want abort message", tt.args, stdout.String())
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("sync(%v) error = %v, want %q", tt.args, err, tt.want)
+			}
+		})
+	}
+}

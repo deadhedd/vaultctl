@@ -68,10 +68,21 @@ type operationState struct {
 	rebase     bool
 	merge      bool
 	cherryPick bool
+	revert     bool
+	sequencer  bool
+}
+
+var unfinishedGitOperationPaths = []string{
+	"rebase-merge",
+	"rebase-apply",
+	"MERGE_HEAD",
+	"CHERRY_PICK_HEAD",
+	"REVERT_HEAD",
+	"sequencer",
 }
 
 func (o operationState) any() bool {
-	return o.rebase || o.merge || o.cherryPick
+	return o.rebase || o.merge || o.cherryPick || o.revert || o.sequencer
 }
 
 func (o operationState) description() string {
@@ -84,6 +95,12 @@ func (o operationState) description() string {
 	}
 	if o.cherryPick {
 		names = append(names, "cherry-pick")
+	}
+	if o.revert {
+		names = append(names, "revert")
+	}
+	if o.sequencer {
+		names = append(names, "sequencer")
 	}
 	return strings.Join(names, ", ")
 }
@@ -182,6 +199,9 @@ func (a *App) syncStart(useMerge bool) error {
 		return err
 	}
 	a.say("Upstream: %s", upstream.name)
+	if err := a.refreshExternalDocs(); err != nil {
+		return err
+	}
 
 	status, err := a.captureChecked("inspect local changes", "status", "--porcelain")
 	if err != nil {
@@ -293,6 +313,14 @@ func (a *App) detectOperation() (operationState, error) {
 		return operationState{}, err
 	}
 	state.cherryPick, err = a.gitPathExists("CHERRY_PICK_HEAD")
+	if err != nil {
+		return operationState{}, err
+	}
+	state.revert, err = a.gitPathExists("REVERT_HEAD")
+	if err != nil {
+		return operationState{}, err
+	}
+	state.sequencer, err = a.gitPathExists("sequencer")
 	if err != nil {
 		return operationState{}, err
 	}
@@ -416,8 +444,13 @@ func (a *App) syncAbort() error {
 	case operation.cherryPick:
 		a.say("Aborting cherry-pick...")
 		return a.checkedStream("abort cherry-pick", "cherry-pick", "--abort")
+	case operation.revert:
+		a.say("Aborting revert...")
+		return a.checkedStream("abort revert", "revert", "--abort")
+	case operation.sequencer:
+		return fmt.Errorf("an unfinished Git sequencer is in progress; use vaultctl git -- revert --abort or vaultctl git -- cherry-pick --abort")
 	default:
-		a.say("No rebase, merge, or cherry-pick is in progress; nothing to abort.")
+		a.say("No rebase, merge, cherry-pick, or revert is in progress; nothing to abort.")
 		return nil
 	}
 }

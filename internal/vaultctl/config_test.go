@@ -9,7 +9,7 @@ import (
 
 func TestLoadClientConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	data := "{\n  \"mode\": \"CLIENT\",\n  \"vault_path\": \"/vault\"\n}\n"
+	data := "{\n  \"mode\": \"CLIENT\",\n  \"vault_path\": \"/vault\",\n  \"source_root\": \"/sources\"\n}\n"
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +21,7 @@ func TestLoadClientConfig(t *testing.T) {
 	if usedPath != path {
 		t.Fatalf("used path = %q, want %q", usedPath, path)
 	}
-	if cfg.Mode != ModeClient || cfg.VaultPath != "/vault" {
+	if cfg.Mode != ModeClient || cfg.VaultPath != "/vault" || cfg.SourceRoot != "/sources" {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 }
@@ -67,6 +67,11 @@ func TestConfigRejectsUnknownAndModeSpecificFields(t *testing.T) {
 		{
 			name: "client field in server mode",
 			json: "{\"mode\":\"server\",\"bare_repo\":\"/repo\",\"worktree\":\"/tree\",\"vault_path\":\"/wrong\"}",
+			want: "client-mode field",
+		},
+		{
+			name: "source root in server mode",
+			json: "{\"mode\":\"server\",\"bare_repo\":\"/repo\",\"worktree\":\"/tree\",\"source_root\":\"/sources\"}",
 			want: "client-mode field",
 		},
 		{

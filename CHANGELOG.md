@@ -6,7 +6,15 @@ This changelog was reconstructed from the repository's Git history. The project 
 
 ## Unreleased
 
-No notable changes recorded yet.
+### Added
+
+- Added client sync refresh for selected documentation paths from named external Git repositories, using a tracked `.vaultctl/external-docs.json` manifest and generated commit state.
+- Added bounded projection validation, source reference checks, ownership tracking, isolated refresh commits, handled recovery, and an atomic refresh lock.
+
+### Changed
+
+- Changed normal client sync to refresh external documentation before saving unrelated vault changes and continuing normal upstream synchronization. Server mode and sync continuation or abort do not run the refresh.
+- Expanded `sync --abort` to abort an unfinished revert and to report the raw Git recovery command for an unsupported sequencer state.
 
 ## 2026-07-16 — Initial implementation
 

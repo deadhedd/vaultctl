@@ -1,0 +1,9 @@
+{
+  "tool": "go testing",
+  "gate": null,
+  "additionalTools": [],
+  "e2eTool": "none",
+  "testDir": "beside the source",
+  "filePattern": "*_test.go",
+  "packageManager": "go modules"
+}

@@ -210,7 +210,7 @@ Resolve files manually, then use `sync --continue`. It stages resolved files,
 verifies that no unmerged index entries remain, continues the rebase or commits
 the merge, and pushes only after Git completes successfully.
 
-`sync --abort` aborts an in-progress rebase, merge, or cherry-pick. If no such
+`sync --abort` aborts an in-progress rebase, merge, cherry-pick, or revert. If no such
 operation is active, it prints a mild `nothing to abort` message and exits
 successfully.
 

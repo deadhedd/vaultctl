@@ -9,7 +9,7 @@
 
 ## Build approach
 
-<TBD, set by /scope>
+Tracer Bullet (one real path through every layer before broadening it).
 
 ## Commands
 

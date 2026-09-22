@@ -14,7 +14,7 @@ _These are recommendations to keep the build orderly, not requirements. You can 
 | 1 | Configuration and mode separation | Foundation | existing |
 | 2 | Vault inspection and save | Foundation | existing |
 | 3 | Client synchronization and recovery | Foundation | existing |
-| 4 | External documentation refresh and projection | Slice 1 | planned |
+| 4 | External documentation refresh and projection | Slice 1 | done |
 
 ## Foundations
 
@@ -38,13 +38,22 @@ Code in `internal/vaultctl/sync.go`.
 
 ## Slice 1: External documentation refresh and projection
 
-### 4. External documentation refresh and projection · planned · needs a decision
+### 4. External documentation refresh and projection · done
 
 Expose selected documentation paths from multiple external project repositories through a manifest tracked by the vault. Refresh must validate every configured source before committing vault changes, preserve source repository authority, and remain safely rerunnable when a later source fails after an earlier source has advanced.
 
-**Done when:** A vault manifest names each source repository, its selected documentation paths, and its vault location; refresh supports client and server mode boundaries, refuses unsafe or incomplete source states, updates all sources only when the complete set is ready, never commits a partially refreshed manifest or documentation projection, reports any source that advanced before a later failure, and leaves normal vault synchronization explicit and safe.
+**Done when:** A vault manifest names each source repository, its selected documentation paths, and its vault location; client sync refreshes all configured sources through explicit tracked references, refuses unsafe or incomplete source states, updates all sources only when the complete set is ready, creates one isolated refresh commit, reports any source that advanced before a later failure, and leaves server refresh and migration behavior deferred.
 
-- [ ] Design it (spec): `/architect external documentation refresh and projection`
+- [x] Design it (spec): `/architect external documentation refresh and projection` ([0001](../specs/0001-external-documentation-refresh.md))
+- [x] Build it: `/develop external documentation refresh and projection`
+  1. [x] Prove the thin client path with nonmutating preflight, one exact branch fetch, one regular file projection, generated state, an isolated refresh commit, and normal sync integration before automatic save, satisfies selected AC-1, AC-3, AC-8, AC-10, AC-11
+  2. [x] Broaden projection and ownership for directories, multiple mappings and sources, ancestry, deterministic state, and reruns, satisfies AC-3, AC-5, AC-7, AC-8
+  3. [x] Complete schema, path, symlink, source tree, vault Git state, dirty destination, and exact staging validation, satisfies AC-2, AC-4, AC-6, remaining AC-7
+  4. [x] Complete handled restoration, managed index recovery, commit outcome handling, terminal manual recovery, and sync boundary tests, satisfies AC-9, AC-10, AC-11
+- [x] Verify it: `/check verify external documentation refresh and projection`
+- [x] Test it: `/test external documentation refresh and projection`
+- [x] Review it (fresh model): `/check review external documentation refresh and projection`
+- [x] Document it: `/document external documentation refresh and projection`
 
 ## Deferred
 
