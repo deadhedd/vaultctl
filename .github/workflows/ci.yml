@@ -21,11 +21,13 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Verify module files
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
       - name: Verify formatting
+        if: runner.os == 'Linux'
         shell: bash
         run: test -z "$(gofmt -l .)"
       - name: Vet

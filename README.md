@@ -45,8 +45,9 @@ mkdir -p bin
 go build -trimpath -o bin/vaultctl ./cmd/vaultctl
 ```
 
-These are the same checks CI runs on Linux and Windows. OpenBSD verification
-remains manual.
+Linux CI runs the full suite above. Windows CI runs `go vet ./...`,
+`go test -race -shuffle=on ./...`, and the build, which verifies the supported
+Windows client platform. OpenBSD verification remains manual.
 
 Install the resulting binary somewhere in `PATH`. For example:
 

@@ -24,13 +24,13 @@ go mod download
 mkdir -p bin
 go build -trimpath -o bin/vaultctl ./cmd/vaultctl
 
-# Verify (same checks as CI on Linux and Windows)
+# Verify locally (the full suite runs in Linux CI)
 go mod tidy
 git diff --exit-code -- go.mod go.sum
 test -z "$(gofmt -l .)"
 go vet ./...
 go test -race -shuffle=on ./...
-
+# Windows CI runs vet, shuffled race tests, and the build.
 # OpenBSD verification remains manual
 ```
 
