@@ -21,11 +21,17 @@ go mod download
 # None, this is a command line tool
 
 # Build
-go build -o vaultctl ./cmd/vaultctl
+mkdir -p bin
+go build -trimpath -o bin/vaultctl ./cmd/vaultctl
 
-# Test
-go test ./...
+# Verify (same checks as CI on Linux and Windows)
+go mod tidy
+git diff --exit-code -- go.mod go.sum
+test -z "$(gofmt -l .)"
 go vet ./...
+go test -race -shuffle=on ./...
+
+# OpenBSD verification remains manual
 ```
 
 ## Specs

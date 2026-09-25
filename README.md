@@ -36,14 +36,22 @@ requests such an operation through the raw `git` escape hatch.
 Go 1.26 or newer is recommended:
 
 ```sh
-go test ./...
-go build -o vaultctl ./cmd/vaultctl
+go mod tidy
+git diff --exit-code -- go.mod go.sum
+test -z "$(gofmt -l .)"
+go vet ./...
+go test -race -shuffle=on ./...
+mkdir -p bin
+go build -trimpath -o bin/vaultctl ./cmd/vaultctl
 ```
+
+These are the same checks CI runs on Linux and Windows. OpenBSD verification
+remains manual.
 
 Install the resulting binary somewhere in `PATH`. For example:
 
 ```sh
-install -m 0755 vaultctl "$HOME/bin/vaultctl"
+install -m 0755 bin/vaultctl "$HOME/bin/vaultctl"
 ```
 
 The project does not install into a production account automatically.

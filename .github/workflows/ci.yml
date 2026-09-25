@@ -9,7 +9,10 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -18,14 +21,22 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Verify module files
+        shell: bash
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
       - name: Verify formatting
+        shell: bash
         run: test -z "$(gofmt -l .)"
       - name: Vet
+        shell: bash
         run: go vet ./...
       - name: Test
+        shell: bash
         run: go test -race -shuffle=on ./...
+      - name: Prepare build output
+        shell: bash
+        run: mkdir -p bin
       - name: Build
+        shell: bash
         run: go build -trimpath -o bin/vaultctl ./cmd/vaultctl
