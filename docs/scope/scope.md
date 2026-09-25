@@ -16,7 +16,7 @@ _These are recommendations to keep the build orderly, not requirements. You can 
 | 3 | Client synchronization and recovery | Foundation | existing |
 | 4 | External documentation refresh and projection | Slice 1 | done |
 | 5 | Exclusive ownership for projected destinations | Slice 1 | done |
-| 6 | Repository tooling maturity | Foundation | in-progress |
+| 6 | Repository tooling maturity | Foundation | done |
 
 ## Foundations
 
@@ -38,7 +38,7 @@ Client synchronization checks repository state and explicit upstream configurati
 
 Code in `internal/vaultctl/sync.go`.
 
-### 6. Repository tooling maturity · Beta · in-progress
+### 6. Repository tooling maturity · Beta · done
 
 Align the README and local verification instructions with the checks enforced by CI, and add Windows CI coverage for this supported client platform. Keep OpenBSD verification manual, with no new OpenBSD CI infrastructure.
 
@@ -47,8 +47,8 @@ Align the README and local verification instructions with the checks enforced by
   1. [x] Align README and root local verification instructions with the CI module, formatting, vet, shuffled race, and build checks.
   2. [x] Run those repository checks on Linux and Windows in CI, while keeping OpenBSD verification manual.
   Code in `.github/workflows/ci.yml`, `README.md`, and `AGENTS.md`.
-- [ ] Verify it: `/check verify repository tooling maturity`
-- [ ] Test it: `/test repository tooling maturity`
+- [x] Verify it: `/check verify repository tooling maturity`
+- [x] Test it: `/test repository tooling maturity`
 
 ## Slice 1: External documentation refresh and projection
 
