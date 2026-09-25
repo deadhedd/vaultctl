@@ -33,7 +33,7 @@ func main() {
 }
 
 func mutateAfterFetch() {
-	if !contains(os.Args[1:], "fetch") || !sameDirectory(mustGetwd(), os.Getenv("VAULTCTL_SOURCE_REPO")) {
+	if !contains(os.Args[1:], "fetch") {
 		return
 	}
 	marker := os.Getenv("VAULTCTL_MUTATION_MARKER")

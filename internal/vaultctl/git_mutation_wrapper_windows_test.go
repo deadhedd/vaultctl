@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func installGitFetchMutation(t testing.TB, sourceRepo, mutationPath, mutationContent string) {
+func installGitFetchMutation(t testing.TB, _ string, mutationPath, mutationContent string) {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -19,7 +19,6 @@ func installGitFetchMutation(t testing.TB, sourceRepo, mutationPath, mutationCon
 	buildGitMutationWrapper(t, binDir)
 	t.Setenv("VAULTCTL_GIT_WRAPPER_MODE", "fetch")
 	t.Setenv("VAULTCTL_REAL_GIT", realGit)
-	t.Setenv("VAULTCTL_SOURCE_REPO", sourceRepo)
 	t.Setenv("VAULTCTL_MUTATION_PATH", mutationPath)
 	t.Setenv("VAULTCTL_MUTATION_CONTENT", mutationContent)
 	t.Setenv("VAULTCTL_MUTATION_MARKER", marker)
