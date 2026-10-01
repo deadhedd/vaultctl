@@ -4,6 +4,15 @@
 It keeps Git as the source of truth while making routine saves and
 synchronization explicit, conservative, and consistent across machines.
 
+The operating model is deliberately simple: inspect repository state, save
+changes explicitly, synchronize only when the Git relationship is understood,
+and stop rather than guess when conflicts or unsafe states require human
+attention. It supports ordinary client clones as well as split
+bare-repository/worktree server layouts.
+
+For the larger system and client workflow, see
+[Client Operations in a Git-Backed Markdown Vault](https://deadhedd.com/2026/10/01/client-operations-in-a-git-backed-markdown-vault/).
+
 The implementation is written in Go, uses only the standard library, and calls
 the installed `git` executable with argument arrays. It does not embed or
 reimplement Git.
