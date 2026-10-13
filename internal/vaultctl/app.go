@@ -142,8 +142,23 @@ func (a *App) save() error {
 }
 
 func (a *App) stageAndCommit(message string, announceNothing bool) error {
-	a.say("Staging all vault changes...")
-	if err := a.checkedStream("stage vault changes", "add", "-A"); err != nil {
+	return a.stageAndCommitExcluding(message, announceNothing, nil)
+}
+
+func (a *App) stageAndCommitExcluding(message string, announceNothing bool, excludedGitlinks map[string]struct{}) error {
+	if len(excludedGitlinks) > 0 {
+		a.say("Staging vault changes while preserving submodule gitlinks...")
+	} else {
+		a.say("Staging all vault changes...")
+	}
+	args := []string{"add", "-A"}
+	if len(excludedGitlinks) > 0 {
+		args = append(args, "--", ".")
+		for _, path := range sortedGitlinkPaths(excludedGitlinks) {
+			args = append(args, ":(top,exclude,literal)"+path)
+		}
+	}
+	if err := a.checkedStream("stage vault changes", args...); err != nil {
 		return err
 	}
 

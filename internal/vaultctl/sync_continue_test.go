@@ -6,13 +6,14 @@ import (
 	"testing"
 )
 
+// covers: AC-7
 func TestSyncContinueAfterRebaseConflict(t *testing.T) {
 	_, client, peer := setupRemoteFixture(t)
 	commitTestFile(t, client, "note.md", "client\n", "client note")
 	commitTestFile(t, peer, "note.md", "peer\n", "peer note")
 	runGit(t, peer, "push", "origin", "main")
 
-	app, _, stderr := testApp(Config{Mode: ModeClient, VaultPath: client})
+	app, stdout, stderr := testApp(Config{Mode: ModeClient, VaultPath: client})
 	err := app.sync(nil)
 	if err == nil {
 		t.Fatal("diverged rebase unexpectedly succeeded despite conflict")
@@ -34,19 +35,23 @@ func TestSyncContinueAfterRebaseConflict(t *testing.T) {
 	if err := app.sync([]string{"--continue"}); err != nil {
 		t.Fatalf("continue rebase: %v\nstderr:\n%s", err, stderr.String())
 	}
+	if strings.Contains(stdout.String(), "Updating selected submodules") {
+		t.Fatalf("sync --continue started the normal submodule phase:\n%s", stdout.String())
+	}
 	assertSyncEqual(t, app)
 	if got := strings.TrimSpace(runGit(t, client, "show", "HEAD:note.md")); got != "resolved" {
 		t.Fatalf("resolved content = %q, want resolved", got)
 	}
 }
 
+// covers: AC-7
 func TestSyncContinueAfterMergeConflict(t *testing.T) {
 	_, client, peer := setupRemoteFixture(t)
 	commitTestFile(t, client, "note.md", "client\n", "client note")
 	commitTestFile(t, peer, "note.md", "peer\n", "peer note")
 	runGit(t, peer, "push", "origin", "main")
 
-	app, _, stderr := testApp(Config{Mode: ModeClient, VaultPath: client})
+	app, stdout, stderr := testApp(Config{Mode: ModeClient, VaultPath: client})
 	err := app.sync([]string{"--merge"})
 	if err == nil {
 		t.Fatal("diverged merge unexpectedly succeeded despite conflict")
@@ -66,6 +71,9 @@ func TestSyncContinueAfterMergeConflict(t *testing.T) {
 	writeTestFile(t, filepath.Join(client, "note.md"), "merged\n")
 	if err := app.sync([]string{"--continue"}); err != nil {
 		t.Fatalf("continue merge: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Updating selected submodules") {
+		t.Fatalf("sync --continue started the normal submodule phase:\n%s", stdout.String())
 	}
 	assertSyncEqual(t, app)
 	parents := strings.Fields(runGit(t, client, "rev-list", "--parents", "-n", "1", "HEAD"))

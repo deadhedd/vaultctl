@@ -1,6 +1,6 @@
-# Scope: vaultctl external project documentation
+# Scope: vaultctl project repositories and documentation
 
-`vaultctl` is a conservative command line tool for Git backed Obsidian vaults. This slice lets you expose selected documentation from multiple external project repositories inside the vault while leaving those source repositories authoritative and avoiding application source duplication.
+`vaultctl` is a conservative command line tool for Git backed Obsidian vaults. This scope covers exposing selected documentation from external project repositories and managing project repositories inside the vault as Git submodules.
 
 **Build approach:** Tracer Bullet (one real path through every layer before broadening it).
 **Workflow:** GA (after `/develop`, run `/check verify`, `/test`, a fresh model `/check review`, then `/document`). The project default level of rigor. `/architect` is the recommended first stop when a feature has a real design decision.
@@ -17,6 +17,7 @@ _These are recommendations to keep the build orderly, not requirements. You can 
 | 4 | External documentation refresh and projection | Slice 1 | done |
 | 5 | Exclusive ownership for projected destinations | Slice 1 | done |
 | 6 | Repository tooling maturity | Foundation | done |
+| 7 | Project repository submodules | Slice 2 | in-progress |
 
 ## Foundations
 
@@ -86,13 +87,31 @@ Treat every configured projection destination as owned by vaultctl. Refresh must
 - [x] Review it (fresh model): `/check review exclusive ownership for projected destinations`
 - [x] Document it: `/document exclusive ownership for projected destinations`
 
+## Slice 2: Project repositories
+
+### 7. Project repository submodules · in-progress
+
+Let vault maintainers manage project repositories inside the vault as Git submodules, keeping each project repository distinct from the vault repository.
+
+**Done when:** Vault maintainers can add, initialize, update, and remove project repositories as Git submodules at explicit vault paths, while failed operations preserve unrelated vault work and report incomplete submodule state.
+Code in `internal/vaultctl/app.go` and `internal/vaultctl/sync.go`.
+- [x] Design it (spec): `/architect project repository submodules` ([0003](../specs/0003-project-repository-submodules/index.md))
+- [x] Build it: `/develop project repository submodules`
+  1. [x] Connect sync autosave and the successful equal history path, protecting unstaged gitlink changes while preserving explicitly staged gitlink changes; run native recursive checkout at recorded commits for Git selected submodules, satisfies AC-2, AC-3, AC-4.
+  2. [x] Integrate the submodule phase after successful parent synchronization across normal sync paths, report parent and submodule outcomes separately, and preserve continue, abort, and server boundaries, satisfies AC-2, AC-5, AC-7.
+  3. [x] Cover native URL and worktree behavior, partial progress and retry, removed worktrees, and explicit lifecycle operations through the Git escape hatch, satisfies AC-1, AC-3, AC-4, AC-6, AC-7.
+- [x] Verify it: AC-4 multi-sync regression passed on OpenBSD 7.9 with disposable repositories; see the [verification record](../specs/0003-project-repository-submodules/verify.md) and [lab evidence](../testing/openbsd-lab.md).
+- [x] Test it: `go test -race -shuffle=on ./...` passed, including the named autosave cases and the later-sync regression.
+- [x] Review it (fresh model): `/check review project repository submodules`
+- [ ] Document it: `/document project repository submodules`
+
 ## Deferred
 
-These items remain outside the first complete path and can be added after the core transaction boundary is proven.
+These items stay outside the external documentation feature for now.
 
 - Documentation transforms, indexing, or generated navigation beyond direct selected path projection
 - Automatic discovery of repositories or documentation paths not named by the vault manifest
-- Repository lifecycle commands for adding, removing, or migrating configured sources
+- Lifecycle commands for adding, removing, or migrating configured external documentation sources
 
 ## Legend
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -208,19 +209,30 @@ func (a *App) syncStart(useMerge bool) error {
 		return err
 	}
 	if status != "" {
+		gitlinks, err := a.syncAutosaveGitlinkPaths()
+		if err != nil {
+			return err
+		}
 		message, err := a.commitMessage()
 		if err != nil {
 			return err
 		}
 		a.say("Saving local changes before contacting the remote...")
-		if err := a.stageAndCommit(message, false); err != nil {
+		if err := a.stageAndCommitExcluding(message, false, gitlinks); err != nil {
 			return err
 		}
-		remaining, err := a.captureChecked("verify saved local changes", "status", "--porcelain")
+		remaining, err := a.git.capture("status", "--porcelain=v1", "-z")
 		if err != nil {
 			return err
 		}
-		if remaining != "" {
+		if remaining.exitCode != 0 {
+			return fmt.Errorf("verify saved local changes failed (Git exited with status %d): %s", remaining.exitCode, strings.TrimSpace(remaining.stderr))
+		}
+		remainingPaths, err := porcelainPaths(remaining.stdout)
+		if err != nil {
+			return fmt.Errorf("verify saved local changes: %w", err)
+		}
+		if !onlyGitlinkPaths(remainingPaths, gitlinks) {
 			return fmt.Errorf("local changes remain after staging and committing; refusing to contact the remote")
 		}
 	}
@@ -237,13 +249,19 @@ func (a *App) syncStart(useMerge bool) error {
 	a.say("Local and upstream histories are %s.", state)
 	switch state {
 	case syncEqual:
-		a.say("The vault is already synced.")
-		return nil
+		a.say("The parent vault history is already synchronized.")
+		return a.finishNormalSync()
 	case syncBehind:
 		a.say("Fast-forwarding to %s...", upstream.name)
-		return a.checkedStream("fast-forward", "merge", "--ff-only", upstream.name)
+		if err := a.checkedStream("fast-forward", "merge", "--ff-only", upstream.name); err != nil {
+			return err
+		}
+		return a.finishNormalSync()
 	case syncAhead:
-		return a.push(upstream)
+		if err := a.push(upstream); err != nil {
+			return err
+		}
+		return a.finishNormalSync()
 	case syncDiverged:
 		if useMerge {
 			a.say("Histories diverged; merging %s...", upstream.name)
@@ -256,10 +274,221 @@ func (a *App) syncStart(useMerge bool) error {
 				return err
 			}
 		}
-		return a.push(upstream)
+		if err := a.push(upstream); err != nil {
+			return err
+		}
+		return a.finishNormalSync()
 	default:
 		return fmt.Errorf("internal error: unknown synchronization state")
 	}
+}
+
+func (a *App) syncAutosaveGitlinkPaths() (map[string]struct{}, error) {
+	index, err := a.git.capture("ls-files", "--stage", "-z")
+	if err != nil {
+		return nil, err
+	}
+	if index.exitCode != 0 {
+		return nil, fmt.Errorf("inspect indexed gitlinks failed (Git exited with status %d): %s", index.exitCode, strings.TrimSpace(index.stderr))
+	}
+	paths, err := gitlinkPathsFromIndex(index.stdout)
+	if err != nil {
+		return nil, err
+	}
+
+	staged, err := a.git.capture("diff", "--cached", "--raw", "-z")
+	if err != nil {
+		return nil, err
+	}
+	if staged.exitCode != 0 {
+		return nil, fmt.Errorf("inspect staged gitlinks failed (Git exited with status %d): %s", staged.exitCode, strings.TrimSpace(staged.stderr))
+	}
+	changedPaths, err := gitlinkPathsFromRawDiff(staged.stdout)
+	if err != nil {
+		return nil, err
+	}
+	for path := range changedPaths {
+		paths[path] = struct{}{}
+	}
+
+	untracked, err := a.git.capture("ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, err
+	}
+	if untracked.exitCode != 0 {
+		return nil, fmt.Errorf("inspect untracked repositories failed (Git exited with status %d): %s", untracked.exitCode, strings.TrimSpace(untracked.stderr))
+	}
+	untrackedPaths, err := gitlinkPathsFromUntracked(untracked.stdout)
+	if err != nil {
+		return nil, err
+	}
+	for path := range untrackedPaths {
+		paths[path] = struct{}{}
+	}
+	return paths, nil
+}
+
+// Git reports an untracked embedded repository as a directory ending in "/".
+// Excluding that directory prevents autosave from recording it as a gitlink.
+func gitlinkPathsFromUntracked(output string) (map[string]struct{}, error) {
+	paths := make(map[string]struct{})
+	if output == "" {
+		return paths, nil
+	}
+	records := strings.Split(output, "\x00")
+	if records[len(records)-1] != "" {
+		return nil, fmt.Errorf("inspect untracked repositories: malformed `git ls-files --others -z` output")
+	}
+	for _, record := range records[:len(records)-1] {
+		if record == "" {
+			return nil, fmt.Errorf("inspect untracked repositories: empty path in `git ls-files --others -z` output")
+		}
+		if strings.HasSuffix(record, "/") {
+			path := strings.TrimSuffix(record, "/")
+			if path == "" {
+				return nil, fmt.Errorf("inspect untracked repositories: empty repository path in `git ls-files --others -z` output")
+			}
+			paths[path] = struct{}{}
+		}
+	}
+	return paths, nil
+}
+
+func gitlinkPathsFromIndex(output string) (map[string]struct{}, error) {
+	paths := make(map[string]struct{})
+	if output == "" {
+		return paths, nil
+	}
+	records := strings.Split(output, "\x00")
+	for i, record := range records {
+		if record == "" && i == len(records)-1 {
+			continue
+		}
+		tab := strings.IndexByte(record, '\t')
+		if tab < 0 {
+			return nil, fmt.Errorf("inspect indexed gitlinks: malformed `git ls-files --stage -z` output")
+		}
+		fields := strings.Fields(record[:tab])
+		path := record[tab+1:]
+		if len(fields) != 3 || path == "" {
+			return nil, fmt.Errorf("inspect indexed gitlinks: malformed `git ls-files --stage -z` record")
+		}
+		if fields[0] == "160000" {
+			paths[path] = struct{}{}
+		}
+	}
+	return paths, nil
+}
+
+func gitlinkPathsFromRawDiff(output string) (map[string]struct{}, error) {
+	paths := make(map[string]struct{})
+	if output == "" {
+		return paths, nil
+	}
+	records := strings.Split(output, "\x00")
+	if records[len(records)-1] != "" {
+		return nil, fmt.Errorf("inspect staged gitlinks: malformed `git diff --cached --raw -z` output")
+	}
+	for i := 0; i < len(records)-1; {
+		metadata := records[i]
+		i++
+		if !strings.HasPrefix(metadata, ":") {
+			return nil, fmt.Errorf("inspect staged gitlinks: malformed `git diff --cached --raw -z` record")
+		}
+		fields := strings.Fields(metadata[1:])
+		if len(fields) != 5 || fields[4] == "" {
+			return nil, fmt.Errorf("inspect staged gitlinks: malformed `git diff --cached --raw -z` metadata")
+		}
+		pathCount := 1
+		if fields[4][0] == 'R' || fields[4][0] == 'C' {
+			pathCount = 2
+		}
+		if i+pathCount > len(records)-1 {
+			return nil, fmt.Errorf("inspect staged gitlinks: incomplete `git diff --cached --raw -z` record")
+		}
+		if fields[0] == "160000" || fields[1] == "160000" {
+			for _, path := range records[i : i+pathCount] {
+				if path == "" {
+					return nil, fmt.Errorf("inspect staged gitlinks: empty path in `git diff --cached --raw -z` record")
+				}
+				paths[path] = struct{}{}
+			}
+		}
+		i += pathCount
+	}
+	return paths, nil
+}
+
+func porcelainPaths(output string) ([]string, error) {
+	if output == "" {
+		return nil, nil
+	}
+	records := strings.Split(output, "\x00")
+	if records[len(records)-1] != "" {
+		return nil, fmt.Errorf("malformed `git status --porcelain=v1 -z` output")
+	}
+	var paths []string
+	for i := 0; i < len(records)-1; {
+		record := records[i]
+		i++
+		if len(record) < 4 || record[2] != ' ' {
+			return nil, fmt.Errorf("malformed `git status --porcelain=v1 -z` record")
+		}
+		paths = append(paths, record[3:])
+		if strings.ContainsAny(record[:2], "RC") {
+			if i >= len(records)-1 {
+				return nil, fmt.Errorf("incomplete rename in `git status --porcelain=v1 -z` output")
+			}
+			paths = append(paths, records[i])
+			i++
+		}
+	}
+	return paths, nil
+}
+
+func onlyGitlinkPaths(paths []string, gitlinks map[string]struct{}) bool {
+	for _, path := range paths {
+		if _, ok := gitlinks[path]; ok {
+			continue
+		}
+		contained := false
+		for gitlink := range gitlinks {
+			if strings.HasPrefix(path, gitlink+"/") {
+				contained = true
+				break
+			}
+		}
+		if !contained {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedGitlinkPaths(paths map[string]struct{}) []string {
+	result := make([]string, 0, len(paths))
+	for path := range paths {
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func (a *App) finishNormalSync() error {
+	a.say("Parent vault synchronization succeeded.")
+	a.say("Updating selected submodules at their recorded commits...")
+	code, err := a.git.stream("submodule", "update", "--init", "--recursive", "--checkout")
+	if err != nil {
+		fmt.Fprintln(a.stderr, "[vaultctl] Parent synchronization succeeded, but submodule state may be incomplete.")
+		return err
+	}
+	if code != 0 {
+		fmt.Fprintln(a.stderr, "[vaultctl] Parent synchronization succeeded, but submodule state may be incomplete.")
+		return fmt.Errorf("submodule update failed (Git exited with status %d)", code)
+	}
+	a.say("Submodule initialization and update succeeded.")
+	a.say("Synchronization completed successfully.")
+	return nil
 }
 
 func (a *App) currentSyncState() (syncState, error) {
@@ -276,7 +505,6 @@ func (a *App) push(upstream upstreamInfo) error {
 	if err := a.checkedStream("push to upstream", "push", "--", upstream.remote, refspec); err != nil {
 		return err
 	}
-	a.say("The vault is synced.")
 	return nil
 }
 
@@ -423,7 +651,11 @@ func (a *App) syncContinue() error {
 	if err != nil {
 		return fmt.Errorf("Git operation completed, but the result cannot be pushed: %w", err)
 	}
-	return a.push(upstream)
+	if err := a.push(upstream); err != nil {
+		return err
+	}
+	a.say("The vault is synced.")
+	return nil
 }
 
 func (a *App) syncAbort() error {

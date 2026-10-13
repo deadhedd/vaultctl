@@ -91,6 +91,8 @@ For the non-bootstrap OpenBSD profile, `create`/`start` confirms VM runtime stat
 
 **SSH trust:** The image contains previously generated host keys. The proof guest presented ED25519 fingerprint `SHA256:FvH8r2mUQvQOQyosuCrh5QmL6ku8qV036bHhJ2upYwc`, which SSH recognized under other addresses. This is historical evidence, **not** authorization to accept a network key without checking it. Verify the exact guest's fingerprint through its trusted console before first network trust; keep strict host-key checking on. Avoid running two clones of this base simultaneously until unique guest identities are provisioned. Clones also inherit the hostname and configured passwords; keep the lab on a trusted isolated network and do not copy secrets into the base.
 
+For a first-trust bootstrap when Scholomance has no known-host entry for the current guest address, open the guest console on Scholomance with `sudo virsh --connect qemu:///system console ephem-vaultctl-lab-proof`. This requires interactive sudo. At the guest console, run `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` and compare the fingerprint before connecting over the network. Exit the console with `Ctrl+]`.
+
 ## Test vault fixtures
 
 Inside the OpenBSD guest, all commands below run as `admin`:
@@ -129,7 +131,17 @@ git -C "$project" commit -m "Test strategy docs update"
 git -C "$project" push
 ```
 
-This advances a **local fixture** remote. It does not touch GitHub, the user's production vault, or a real project repository. The project submodule feature is not yet implemented or tested; adding submodules is upcoming vaultctl development work, not a baseline capability verified in this runbook.
+This advances a **local fixture** remote. It does not touch GitHub, the user's production vault, or a real project repository. Project submodule support now has disposable local Git coverage. The OpenBSD check below uses separate disposable repositories and does not mutate these preserved fixtures.
+
+### OpenBSD submodule integration check · 2026-10-13
+
+Scholomance reported `vaultctl-lab-proof` running at `192.168.122.185`. Scholomance already had a known-host entry for that exact address. A strict SSH connection from Scholomance succeeded, and the guest ED25519 fingerprint matched the recorded value above. SSH from Ghost directly to the guest address timed out because it is on the hypervisor's private network. No host key was accepted or changed during this check. The console bootstrap command is documented above for a future first-trust case.
+
+A Ghost cross-build was installed in the guest as `~/bin/vaultctl-submodules-proof`. Server and client `doctor` and `status` checks passed. The runtime checks created a disposable `/tmp/vaultctl-submodule-check.*` tree with local bare parent, project, nested, blocked, and lifecycle repositories, then removed it with a trap. Equal, fast-forward, and `sync --merge` paths; active selection; nested pins; native add, update, and removal; merge and rebase strategy overrides; staged and unstaged gitlink autosave; partial update and retry; dirty checkout failure; local URL override; failed parent push; server mode; and sync continuation and abort boundaries were exercised.
+
+The 2026-10-13 follow-up exposed the AC-4 defect: after `git rm --cached Projects/z-bad` and a successful sync, a later autosave could add the retained repository as a new gitlink. The corrected build was verified in a fresh disposable run. Its OpenBSD/amd64 SHA256 was `7275730e17bb635d74fc36165618d34d685bc3369e1e1a557d996161394f594d` on Ghost and in `~/bin/vaultctl` on the guest. The current guest address was `192.168.122.185`; strict SSH confirmed ED25519 fingerprint `SHA256:FvH8r2mUQvQOQyosuCrh5QmL6ku8qV036bHhJ2upYwc`. Server and client `doctor` and `status` checks passed.
+
+The AC-4 rerun created `/tmp/vaultctl-ac4.rbM0nt` with a local bare parent, a client clone, and a project repository; a shell trap removed the tree on exit. Before the first autosave, `git diff --cached --raw` showed `:160000 000000 be0b678 0000000 D project`. After sync, the cached diff was empty, the parent tree had no `project` entry, and the retained worktree stayed at commit `be0b67824914ac888fde54585361d69d7849e187`. Before the second autosave, `git ls-files --others --exclude-standard` reported `project/`. The second sync committed `second.md`, left the parent tree without the gitlink, kept the worktree at the same commit, and exited successfully. Both syncs completed their parent and submodule phases. No reset was run, and no preserved fixture, production vault, daemon, or real project remote was used.
 
 ## Update the vaultctl binary after code changes
 
@@ -212,4 +224,4 @@ Use the name you actually selected with subsequent commands. Ephemctl creates a 
 2. Capture separate wall times for `stop`, `reset`, and `start` if the reported multi-minute sequence repeats; see the paired ephemctl field report.
 3. Decide whether to retire the old `vaultctl-lab` VM (which uses the *clean* OpenBSD profile); do not silently remove it.
 4. Before running multiple clones, implement a deliberate guest-identity policy (unique SSH host keys, hostname, and any other machine-specific state).
-5. Test vaultctl's proposed submodule integration using these synthetic remotes; the current smoke test does not prove submodule or sync behavior.
+5. Submodule integration and the AC-4 multi-sync regression passed on OpenBSD 7.9 on 2026-10-13 with disposable local repositories. See the result above.
