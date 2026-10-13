@@ -17,7 +17,7 @@ _These are recommendations to keep the build orderly, not requirements. You can 
 | 4 | External documentation refresh and projection | Slice 1 | done |
 | 5 | Exclusive ownership for projected destinations | Slice 1 | done |
 | 6 | Repository tooling maturity | Foundation | done |
-| 7 | Project repository submodules | Slice 2 | in-progress |
+| 7 | Project repository submodules | Slice 2 | done |
 
 ## Foundations
 
@@ -89,7 +89,7 @@ Treat every configured projection destination as owned by vaultctl. Refresh must
 
 ## Slice 2: Project repositories
 
-### 7. Project repository submodules · in-progress
+### 7. Project repository submodules · done
 
 Let vault maintainers manage project repositories inside the vault as Git submodules, keeping each project repository distinct from the vault repository.
 
@@ -103,7 +103,7 @@ Code in `internal/vaultctl/app.go` and `internal/vaultctl/sync.go`.
 - [x] Verify it: AC-4 multi-sync regression passed on OpenBSD 7.9 with disposable repositories; see the [verification record](../specs/0003-project-repository-submodules/verify.md) and [lab evidence](../testing/openbsd-lab.md).
 - [x] Test it: `go test -race -shuffle=on ./...` passed, including the named autosave cases and the later-sync regression.
 - [x] Review it (fresh model): `/check review project repository submodules`
-- [ ] Document it: `/document project repository submodules`
+- [x] Document it: `/document project repository submodules`
 
 ## Deferred
 
