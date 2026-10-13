@@ -190,6 +190,45 @@ The `--` separator is optional for compatibility but recommended for clarity.
 Arguments are passed directly to Git without shell interpolation. In server
 mode this escape hatch is the only way to request fetch, push, rebase, or merge.
 
+### Project repository submodules
+
+Use the Git escape hatch for submodule lifecycle operations. For example:
+
+```sh
+vaultctl git -- submodule add <repository-url> <vault-path>
+vaultctl git -- submodule init -- <vault-path>
+vaultctl git -- submodule update --init --recursive --checkout
+vaultctl git -- submodule status --recursive
+vaultctl git -- rm -- <vault-path>
+```
+
+Stage and commit the resulting `.gitmodules` and gitlink changes as normal.
+During a normal client sync, vaultctl runs:
+
+```sh
+git submodule update --init --recursive --checkout
+```
+
+Git chooses active submodules and checks out the commits recorded by the vault.
+The command does not follow remote branch tips or force a checkout. A new
+submodule uses its `.gitmodules` URL. An initialized submodule keeps its local
+URL setting. If Git cannot fetch from that URL or cannot safely update local
+work, sync returns an error after reporting that the parent vault synchronized.
+Resolve the Git error and run normal sync again to retry.
+
+Normal sync preserves explicitly staged gitlink additions, removals, and
+commit changes. It does not stage an unstaged submodule checkout change as a
+new parent commit. To intentionally select another project commit, stage its
+path through `vaultctl git -- add <vault-path>` first.
+
+If an incoming commit removes a submodule, automatic sync leaves any existing
+worktree on disk. Review local files before cleaning it up. You can preview
+Git's cleanup with `vaultctl git -- clean -n -f -f -d -- <vault-path>`. Only
+after confirming that the preview contains nothing you need, run
+`vaultctl git -- clean -f -f -d -- <vault-path>` to remove that untracked
+repository. Sync continuation, sync abort, and server mode do not run the
+automatic submodule update.
+
 ### sync
 
 A normal client sync follows a state machine:
@@ -205,6 +244,8 @@ A normal client sync follows a state machine:
    - behind: fast-forward with `git merge --ff-only`;
    - ahead: push to the configured upstream branch;
    - diverged: rebase onto upstream and push.
+8. After the parent operations succeed, initialize and check out the selected
+   submodules recursively at the commits recorded by the vault.
 
 `sync --merge` changes only the diverged case: it merges upstream instead of
 rebasing, then pushes. It has no effect on equal, ahead-only, or behind-only
@@ -212,6 +253,13 @@ histories.
 
 Pushes target the configured branch remote and merge ref explicitly. The tool
 does not guess `origin`, `main`, or `master`.
+
+The parent sync phase succeeds only after any required push. vaultctl reports
+that result before starting the submodule phase. If submodule update fails,
+the parent result remains successful, but the overall sync exits with failure
+because selected project worktrees may be incomplete. Git can finish some
+submodule updates before reporting an error. Completed updates remain in
+place, and another normal sync can retry them.
 
 ### Conflict recovery
 

@@ -90,3 +90,17 @@ func setupRemoteFixture(t testing.TB) (remote, client, peer string) {
 	configureIdentity(t, peer)
 	return remote, client, peer
 }
+
+func setupSubmoduleRemoteFixture(t testing.TB) (remote, client, peer, project string) {
+	t.Helper()
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	remote, client, peer = setupRemoteFixture(t)
+	project = initTestRepo(t)
+	runGit(t, client, "config", "protocol.file.allow", "always")
+	runGit(t, client, "submodule", "add", project, "project")
+	runGit(t, client, "commit", "-m", "add project submodule")
+	runGit(t, client, "push", "origin", "main")
+	runGit(t, peer, "pull", "--ff-only")
+	runGit(t, peer, "config", "protocol.file.allow", "always")
+	return remote, client, peer, project
+}
