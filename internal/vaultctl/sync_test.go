@@ -573,6 +573,7 @@ func TestSyncChecksOutRecursiveGitlinksAtParentPins(t *testing.T) {
 	runGit(t, peer, "push", "origin", "main")
 
 	clientProject := filepath.Join(client, "project")
+	configureIdentity(t, clientProject)
 	runGit(t, clientProject, "fetch", "origin")
 	runGit(t, clientProject, "switch", "-c", "local-work")
 	commitTestFile(t, clientProject, "local.md", "local project work\n", "local project work")
