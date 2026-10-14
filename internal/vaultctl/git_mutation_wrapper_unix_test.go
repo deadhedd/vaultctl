@@ -85,3 +85,47 @@ exit "$status"
 	t.Setenv("VAULTCTL_MUTATION_CONTENT", mutationContent)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
+
+func installGitParentFollowupAdvance(t testing.TB, vaultRoot, parentRemote, target string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	countPath := filepath.Join(binDir, "parent-fetch.count")
+	wrapper := filepath.Join(binDir, "git")
+	writeTestFile(t, wrapper, `#!/bin/sh
+is_fetch=false
+for arg in "$@"; do
+	if [ "$arg" = "fetch" ]; then
+		is_fetch=true
+	fi
+done
+if [ "$PWD" = "$VAULTCTL_VAULT_ROOT" ] && [ "$is_fetch" = true ]; then
+	count=0
+	if [ -f "$VAULTCTL_PARENT_FETCH_COUNT" ]; then
+		count=$(cat "$VAULTCTL_PARENT_FETCH_COUNT")
+	fi
+	count=$((count + 1))
+	printf '%s' "$count" > "$VAULTCTL_PARENT_FETCH_COUNT"
+	if [ "$count" -eq 2 ]; then
+		"$VAULTCTL_REAL_GIT" --git-dir="$VAULTCTL_PARENT_REMOTE" update-ref refs/heads/main "$VAULTCTL_PARENT_ADVANCE"
+		status=$?
+		if [ "$status" -ne 0 ]; then
+			exit "$status"
+		fi
+	fi
+fi
+exec "$VAULTCTL_REAL_GIT" "$@"
+`)
+	if err := os.Chmod(wrapper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VAULTCTL_REAL_GIT", realGit)
+	t.Setenv("VAULTCTL_VAULT_ROOT", vaultRoot)
+	t.Setenv("VAULTCTL_PARENT_REMOTE", parentRemote)
+	t.Setenv("VAULTCTL_PARENT_ADVANCE", target)
+	t.Setenv("VAULTCTL_PARENT_FETCH_COUNT", countPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}

@@ -13,6 +13,7 @@ This package contains the command line behavior for vaultctl. It parses commands
 | `config.go` | Platform config paths, strict JSON decoding, and mode validation |
 | `git.go` | The external Git and OpenBSD `doas` process boundary |
 | `sync.go` | Upstream checks, history classification, synchronization, and conflict recovery |
+| `submodule_sync.go` | Active direct submodule selection, tracking or pinned sync, grouped gitlink recording, projection guards, and scoped recovery |
 | `external_docs.go` | Client sync refresh, projection, ownership state, and refresh recovery for selected external documentation |
 | `*_test.go` | Parser, configuration, process boundary, save, sync, and fixture tests |
 
@@ -22,7 +23,8 @@ This package contains the command line behavior for vaultctl. It parses commands
 - Client mode uses the configured vault as the process directory. Server mode supplies explicit bare repository and worktree arguments.
 - Check the current repository state before changing it. A sync first checks the worktree, unfinished operations, conflicts, and upstream configuration.
 - A normal client sync refreshes selected external documentation only when the tracked `.vaultctl/external-docs.json` manifest exists. It uses the configured `source_root`, explicit source remotes and branches, and one isolated refresh commit. Server mode and sync continuation or abort do not run refresh.
-- After every successful normal client sync, run native recursive submodule checkout at the parent recorded commits. Autosave excludes unstaged gitlink changes while preserving explicitly staged gitlink decisions. Sync continuation, abort, and server mode skip this phase.
+- After successful normal client sync, run native recursive checkout only for selected direct submodules, at the parent-recorded commits. Autosave excludes unstaged gitlink changes while preserving explicitly staged gitlink decisions. Sync continuation, abort, and server mode skip this phase.
+- Tracking direct submodules reconcile through the existing child Git worktrees, then record successful changed gitlinks together. Child `sync --continue/--abort --submodule PATH` is scoped to one registered direct child; continuation completes its rebase or merge without pushing, and a later normal sync validates and pushes the selected target.
 - External documentation refresh requires tracked version 2 ownership state and an exact committed and filesystem projection match before source fetch. It rejects legacy state and unexpected destination content, and uses exact owned file paths for refresh staging and recovery.
 - Keep synchronization outcomes explicit: equal, ahead, behind, or diverged. Diverged histories use rebase by default or merge only with `--merge`.
 - Report conflicts and require the user to resolve them. Continue only after unresolved index entries are gone.

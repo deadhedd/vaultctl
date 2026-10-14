@@ -10,6 +10,9 @@ import (
 )
 
 func main() {
+	if os.Getenv("VAULTCTL_GIT_WRAPPER_MODE") == "parent-followup-advance" {
+		mutateParentFollowupRefBeforeFetch()
+	}
 	command := exec.Command(os.Getenv("VAULTCTL_REAL_GIT"), os.Args[1:]...)
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
@@ -29,6 +32,32 @@ func main() {
 		mutateAfterFetch()
 	case "managed-status":
 		mutateAfterManagedStatus()
+	}
+}
+
+func mutateParentFollowupRefBeforeFetch() {
+	if !contains(os.Args[1:], "fetch") || !sameDirectory(mustGetwd(), os.Getenv("VAULTCTL_VAULT_ROOT")) {
+		return
+	}
+	countPath := os.Getenv("VAULTCTL_PARENT_FETCH_COUNT")
+	data, err := os.ReadFile(countPath)
+	count := 0
+	if err == nil {
+		count, err = strconv.Atoi(string(data))
+	}
+	if err != nil && !os.IsNotExist(err) {
+		fatal(err)
+	}
+	count++
+	if err := os.WriteFile(countPath, []byte(strconv.Itoa(count)), 0o600); err != nil {
+		fatal(err)
+	}
+	if count != 2 {
+		return
+	}
+	command := exec.Command(os.Getenv("VAULTCTL_REAL_GIT"), "--git-dir="+os.Getenv("VAULTCTL_PARENT_REMOTE"), "update-ref", "refs/heads/main", os.Getenv("VAULTCTL_PARENT_ADVANCE"))
+	if output, err := command.CombinedOutput(); err != nil {
+		fatal(errors.New(err.Error() + ": " + string(output)))
 	}
 }
 

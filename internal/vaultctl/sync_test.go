@@ -137,7 +137,7 @@ func TestSyncLifecycle(t *testing.T) {
 	}
 }
 
-// covers: AC-2, AC-5
+// covers: AC-2, AC-14
 func TestSyncSubmodulePhaseAcrossParentSyncPaths(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -182,6 +182,7 @@ func TestSyncSubmodulePhaseAcrossParentSyncPaths(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, client, peer, _ := setupSubmoduleRemoteFixture(t)
 			runGit(t, client, "submodule", "deinit", "-f", "--", "project")
+			runGit(t, client, "config", "submodule.active", ".")
 			if tt.setup != nil {
 				tt.setup(t, client, peer)
 			}
@@ -195,7 +196,7 @@ func TestSyncSubmodulePhaseAcrossParentSyncPaths(t *testing.T) {
 			}
 			output := stdout.String()
 			parent := strings.Index(output, "Parent vault synchronization succeeded.")
-			update := strings.Index(output, "Updating selected submodules at their recorded commits...")
+			update := strings.Index(output, "Synchronizing selected submodules...")
 			success := strings.Index(output, "Submodule initialization and update succeeded.")
 			if parent < 0 || update <= parent || success <= update {
 				t.Fatalf("sync phases are missing or out of order:\n%s", output)
@@ -204,7 +205,7 @@ func TestSyncSubmodulePhaseAcrossParentSyncPaths(t *testing.T) {
 	}
 }
 
-// covers: AC-4
+// covers: AC-7
 func TestSyncAutosavePreservesGitlinkDecisions(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -214,6 +215,7 @@ func TestSyncAutosavePreservesGitlinkDecisions(t *testing.T) {
 		{
 			name: "unstaged submodule checkout drift",
 			setup: func(t *testing.T, client, project string) (string, bool) {
+				runGit(t, client, "config", "--file", ".gitmodules", "submodule.project.vaultctl-pinned", "true")
 				pinned := gitlinkCommit(t, client, "project")
 				commitTestFile(t, project, "next.md", "next\n", "next project commit")
 				target := strings.TrimSpace(runGit(t, project, "rev-parse", "HEAD"))
@@ -239,6 +241,8 @@ func TestSyncAutosavePreservesGitlinkDecisions(t *testing.T) {
 			name: "staged removal with worktree left behind",
 			setup: func(t *testing.T, client, _ string) (string, bool) {
 				runGit(t, client, "rm", "--cached", "--", "project")
+				runGit(t, client, "config", "--file", ".gitmodules", "--remove-section", "submodule.project")
+				runGit(t, client, "add", "--", ".gitmodules")
 				return "", false
 			},
 			secondAutosave: true,
@@ -298,7 +302,7 @@ func TestSyncAutosavePreservesGitlinkDecisions(t *testing.T) {
 	}
 }
 
-// covers: AC-4
+// covers: AC-7
 func TestGitlinkPathsFromUntracked(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -330,7 +334,7 @@ func TestGitlinkPathsFromUntracked(t *testing.T) {
 	}
 }
 
-// covers: AC-4
+// covers: AC-7
 func TestGitlinkPathsFromIndex(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -362,7 +366,7 @@ func TestGitlinkPathsFromIndex(t *testing.T) {
 	}
 }
 
-// covers: AC-4
+// covers: AC-7
 func TestGitlinkPathsFromRawDiff(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -401,7 +405,7 @@ func TestGitlinkPathsFromRawDiff(t *testing.T) {
 	}
 }
 
-// covers: AC-4
+// covers: AC-7
 func TestPorcelainPaths(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -446,7 +450,7 @@ func TestPorcelainPaths(t *testing.T) {
 	}
 }
 
-// covers: AC-4
+// covers: AC-7
 func TestOnlyGitlinkPaths(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -474,7 +478,7 @@ func TestOnlyGitlinkPaths(t *testing.T) {
 	}
 }
 
-// covers: AC-4
+// covers: AC-7
 func TestSortedGitlinkPaths(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -548,16 +552,19 @@ func TestSyncSubmoduleUpdateUsesGitActiveSelection(t *testing.T) {
 	}
 }
 
-// covers: AC-3
-func TestSyncChecksOutRecursiveGitlinksAtParentPins(t *testing.T) {
+// covers: AC-3, AC-12
+func TestSyncChecksOutNestedGitlinkWithBranchDotAtParentPin(t *testing.T) {
 	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
 	_, client, peer := setupRemoteFixture(t)
 	project := initTestRepo(t)
 	nested := initTestRepo(t)
 	runGit(t, project, "submodule", "add", nested, "nested")
+	runGit(t, project, "config", "--file", ".gitmodules", "submodule.nested.branch", ".")
+	runGit(t, project, "add", "--", ".gitmodules")
 	runGit(t, project, "commit", "-m", "add nested project")
 	nestedPin := strings.TrimSpace(runGit(t, nested, "rev-parse", "HEAD"))
 	runGit(t, client, "submodule", "add", project, "project")
+	runGit(t, client, "config", "--file", ".gitmodules", "submodule.project.vaultctl-pinned", "true")
 	runGit(t, client, "commit", "-m", "add project submodule")
 	runGit(t, client, "push", "origin", "main")
 	runGit(t, peer, "pull", "--ff-only")
@@ -597,7 +604,7 @@ func TestSyncChecksOutRecursiveGitlinksAtParentPins(t *testing.T) {
 	}
 }
 
-// covers: AC-2, AC-3
+// covers: AC-2, AC-6
 func TestSyncPreservesInitializedSubmoduleRemoteOriginURL(t *testing.T) {
 	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
 	_, client, peer, project := setupSubmoduleRemoteFixture(t)
@@ -639,9 +646,14 @@ func TestSyncPreservesInitializedSubmoduleRemoteOriginURL(t *testing.T) {
 	}
 }
 
-// covers: AC-4, AC-5
+// covers: AC-2, AC-12, AC-14
 func TestSyncSubmoduleFailurePreservesDirtyWorkAndCanRetry(t *testing.T) {
 	_, client, peer, project := setupSubmoduleRemoteFixture(t)
+	runGit(t, client, "config", "--file", ".gitmodules", "submodule.project.vaultctl-pinned", "true")
+	runGit(t, client, "add", "--", ".gitmodules")
+	runGit(t, client, "commit", "-m", "pin project submodule")
+	runGit(t, client, "push", "origin", "main")
+	runGit(t, peer, "pull", "--ff-only")
 	runGit(t, peer, "submodule", "update", "--init", "--", "project")
 	target := commitTestFileAndHash(t, project, "note.md", "upstream project version\n", "upstream project version")
 	peerProject := filepath.Join(peer, "project")
@@ -655,10 +667,10 @@ func TestSyncSubmoduleFailurePreservesDirtyWorkAndCanRetry(t *testing.T) {
 	writeTestFile(t, filepath.Join(clientProject, "note.md"), "local uncommitted work\n")
 	app, stdout, stderr := testApp(Config{Mode: ModeClient, VaultPath: client})
 	err := app.sync(nil)
-	if err == nil || !strings.Contains(err.Error(), "submodule update failed") {
-		t.Fatalf("sync error = %v, want a submodule update failure", err)
+	if err == nil || !strings.Contains(err.Error(), "pinned checkout failed") {
+		t.Fatalf("sync error = %v, want a pinned checkout failure", err)
 	}
-	if !strings.Contains(stderr.String(), "local changes") || !strings.Contains(stderr.String(), "submodule state may be incomplete") {
+	if !strings.Contains(stderr.String(), "local changes") || !strings.Contains(stderr.String(), "child synchronization or parent link recording is incomplete") {
 		t.Fatalf("submodule failure output did not preserve Git diagnostics and phase state:\n%s", stderr.String())
 	}
 	if strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD")) != strings.TrimSpace(runGit(t, peer, "rev-parse", "HEAD")) {
@@ -671,7 +683,7 @@ func TestSyncSubmoduleFailurePreservesDirtyWorkAndCanRetry(t *testing.T) {
 	if string(got) != "local uncommitted work\n" {
 		t.Fatalf("dirty submodule content = %q, want it preserved", got)
 	}
-	if parent, update := strings.Index(stdout.String(), "Parent vault synchronization succeeded."), strings.Index(stdout.String(), "Updating selected submodules"); parent < 0 || update <= parent {
+	if parent, update := strings.Index(stdout.String(), "Parent vault synchronization succeeded."), strings.Index(stdout.String(), "Synchronizing selected submodules"); parent < 0 || update <= parent {
 		t.Fatalf("parent success was not reported before the submodule phase:\n%s", stdout.String())
 	}
 
@@ -684,12 +696,13 @@ func TestSyncSubmoduleFailurePreservesDirtyWorkAndCanRetry(t *testing.T) {
 	}
 }
 
-// covers: AC-5, AC-6
+// covers: AC-2, AC-4, AC-10, AC-11, AC-14
 func TestSyncSubmoduleFailureKeepsCompletedUpdatesAndCanRetry(t *testing.T) {
 	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
 	_, client, peer := setupRemoteFixture(t)
 	good := initTestRepo(t)
 	bad := initTestRepo(t)
+	goodBase := strings.TrimSpace(runGit(t, good, "rev-parse", "HEAD"))
 	goodTarget := commitTestFileAndHash(t, good, "next.md", "next good revision\n", "next good revision")
 	badTarget := commitTestFileAndHash(t, bad, "next.md", "next bad revision\n", "next bad revision")
 	runGit(t, client, "submodule", "add", good, "a-good")
@@ -709,12 +722,8 @@ func TestSyncSubmoduleFailureKeepsCompletedUpdatesAndCanRetry(t *testing.T) {
 	runGit(t, client, "push", "origin", "main")
 	runGit(t, peer, "pull", "--ff-only")
 
-	peerGood := filepath.Join(peer, "a-good")
-	runGit(t, peer, "submodule", "update", "--init", "--", "a-good")
-	runGit(t, peerGood, "fetch", "origin")
-	runGit(t, peerGood, "checkout", goodTarget)
+	runGit(t, peer, "update-index", "--add", "--cacheinfo", "160000,"+goodBase+",a-good")
 	runGit(t, peer, "update-index", "--add", "--cacheinfo", "160000,"+badTarget+",z-bad")
-	runGit(t, peer, "add", "--", "a-good")
 	runGit(t, peer, "commit", "-m", "select newer project revisions")
 	runGit(t, peer, "push", "origin", "main")
 	runGit(t, client, "config", "submodule.fetchJobs", "1")
@@ -722,11 +731,14 @@ func TestSyncSubmoduleFailureKeepsCompletedUpdatesAndCanRetry(t *testing.T) {
 
 	app, _, stderr := testApp(Config{Mode: ModeClient, VaultPath: client})
 	err = app.sync(nil)
-	if err == nil || !strings.Contains(stderr.String(), "submodule state may be incomplete") {
+	if err == nil || !strings.Contains(stderr.String(), "child synchronization or parent link recording is incomplete") {
 		t.Fatalf("sync error = %v, stderr:\n%s", err, stderr.String())
 	}
 	if got := strings.TrimSpace(runGit(t, filepath.Join(client, "a-good"), "rev-parse", "HEAD")); got != goodTarget {
 		t.Fatalf("completed project update was rolled back or missed: got %s, want %s", got, goodTarget)
+	}
+	if got := gitlinkCommit(t, client, "a-good"); got != goodBase {
+		t.Fatalf("failed group unexpectedly recorded a-good: got %s, want %s", got, goodBase)
 	}
 	if _, err := os.Stat(filepath.Join(client, "z-bad", "note.md")); err == nil {
 		t.Fatal("submodule with the unavailable URL unexpectedly initialized")
@@ -750,7 +762,7 @@ func TestSyncSubmoduleFailureKeepsCompletedUpdatesAndCanRetry(t *testing.T) {
 	}
 }
 
-// covers: AC-2, AC-5, AC-7
+// covers: AC-2, AC-14
 func TestFailedParentSyncDoesNotStartSubmodulePhase(t *testing.T) {
 	_, client, _, _ := setupSubmoduleRemoteFixture(t)
 	runGit(t, client, "submodule", "deinit", "-f", "--", "project")
@@ -759,7 +771,7 @@ func TestFailedParentSyncDoesNotStartSubmodulePhase(t *testing.T) {
 	if err := app.sync(nil); err == nil {
 		t.Fatal("sync unexpectedly succeeded with a missing parent remote")
 	}
-	if strings.Contains(stdout.String(), "Parent vault synchronization succeeded.") || strings.Contains(stdout.String(), "Updating selected submodules") {
+	if strings.Contains(stdout.String(), "Parent vault synchronization succeeded.") || strings.Contains(stdout.String(), "Synchronizing selected submodules") {
 		t.Fatalf("submodule phase started after parent sync failure:\n%s", stdout.String())
 	}
 	if _, err := os.Stat(filepath.Join(client, "project", "note.md")); err == nil {
@@ -767,7 +779,7 @@ func TestFailedParentSyncDoesNotStartSubmodulePhase(t *testing.T) {
 	}
 }
 
-// covers: AC-7
+// covers: AC-2
 func TestSyncKeepsWorktreeAfterParentRemovesGitlink(t *testing.T) {
 	_, client, peer, _ := setupSubmoduleRemoteFixture(t)
 	runGit(t, peer, "submodule", "update", "--init", "--recursive", "--", "project")
@@ -839,15 +851,57 @@ func TestMissingUpstreamStopsBeforeSavingChanges(t *testing.T) {
 	}
 }
 
+// covers: AC-14
 func TestSyncRefusesServerMode(t *testing.T) {
 	cfg := Config{Mode: ModeServer, BareRepo: "/unused/repo", Worktree: "/unused/tree"}
-	for _, args := range [][]string{nil, {"--continue"}, {"--abort"}, {"--merge"}} {
-		app, _, _ := testApp(cfg)
-		err := app.sync(args)
-		var displayed *userError
-		if !errors.As(err, &displayed) || displayed.Error() != serverSyncMessage {
-			t.Errorf("sync(%v) error = %v, want server refusal", args, err)
-		}
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "normal sync is refused", args: nil},
+		{name: "parent continuation is refused", args: []string{"--continue"}},
+		{name: "parent abort is refused", args: []string{"--abort"}},
+		{name: "merge sync is refused", args: []string{"--merge"}},
+		{name: "scoped child continuation is refused", args: []string{"--continue", "--submodule", "Projects/child"}},
+		{name: "scoped child abort is refused", args: []string{"--abort", "--submodule", "Projects/child"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, _, _ := testApp(cfg)
+			err := app.sync(tt.args)
+			var displayed *userError
+			if !errors.As(err, &displayed) || displayed.Error() != serverSyncMessage {
+				t.Errorf("sync(%v) error = %v, want server refusal", tt.args, err)
+			}
+		})
+	}
+}
+
+// covers: AC-8, AC-9
+func TestReportConflictsQuotesSubmoduleRecoveryPath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "ordinary path", path: "Projects/child", want: "'Projects/child'"},
+		{name: "path with spaces and apostrophe", path: "Projects/O'Brien notes", want: "'Projects/O'\\''Brien notes'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			app := newApp(Config{}, nil, &bytes.Buffer{}, &stderr)
+			app.submoduleRecoveryPath = tt.path
+
+			app.reportConflicts(nil)
+
+			for _, action := range []string{"continue", "abort"} {
+				want := "vaultctl sync --" + action + " --submodule " + tt.want
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("conflict recovery guidance missing %q:\n%s", want, stderr.String())
+				}
+			}
+		})
 	}
 }
 
@@ -880,7 +934,7 @@ func TestConflictDetectionAndAbort(t *testing.T) {
 	if err := app.sync([]string{"--abort"}); err != nil {
 		t.Fatalf("abort merge: %v", err)
 	}
-	if strings.Contains(stdout.String(), "Updating selected submodules") {
+	if strings.Contains(stdout.String(), "Synchronizing selected submodules") {
 		t.Fatalf("sync --abort started the normal submodule phase:\n%s", stdout.String())
 	}
 	operation, err = app.detectOperation()

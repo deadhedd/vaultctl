@@ -59,16 +59,22 @@ func validateInvocation(inv invocation) error {
 			return &usageError{fmt.Sprintf("%s does not accept arguments", inv.command)}
 		}
 	case "sync":
-		if len(inv.args) > 1 {
-			return &usageError{"sync accepts at most one of --continue, --abort, or --merge"}
+		if len(inv.args) == 0 {
+			break
 		}
 		if len(inv.args) == 1 {
 			switch inv.args[0] {
 			case "--continue", "--abort", "--merge":
+				break
 			default:
 				return &usageError{fmt.Sprintf("unknown sync option: %s", inv.args[0])}
 			}
+			break
 		}
+		if len(inv.args) == 3 && (inv.args[0] == "--continue" || inv.args[0] == "--abort") && inv.args[1] == "--submodule" && inv.args[2] != "" {
+			break
+		}
+		return &usageError{"sync accepts --continue or --abort with an optional --submodule PATH"}
 	case "git":
 		args := inv.args
 		if len(args) > 0 && args[0] == "--" {
@@ -92,7 +98,9 @@ Usage:
   vaultctl [--config PATH] save
   vaultctl [--config PATH] sync
   vaultctl [--config PATH] sync --continue
+  vaultctl [--config PATH] sync --continue --submodule PATH
   vaultctl [--config PATH] sync --abort
+  vaultctl [--config PATH] sync --abort --submodule PATH
   vaultctl [--config PATH] sync --merge
   vaultctl [--config PATH] doctor
   vaultctl [--config PATH] git -- <args...>
@@ -104,8 +112,10 @@ Commands:
   log             show the latest 30 commits as a graph
   save            stage and commit all vault changes
   sync            conservatively synchronize a client clone
-  sync --continue continue a conflicted rebase or merge, then push
-  sync --abort    abort an in-progress rebase, merge, cherry-pick, or revert
+  sync --continue continue a conflicted parent rebase or merge, then push
+  sync --abort    abort an in-progress rebase, merge, cherry-pick, or revert in the parent vault
+  sync --continue --submodule PATH continue a conflicted child operation
+  sync --abort --submodule PATH abort a conflicted child operation
   sync --merge    merge instead of rebasing when histories diverge
   doctor          check configuration and repository basics
   git -- ARGS     run Git directly in the configured vault context

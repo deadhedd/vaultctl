@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// covers: AC-7
+// covers: AC-2
 func TestSyncContinueAfterRebaseConflict(t *testing.T) {
 	_, client, peer := setupRemoteFixture(t)
 	commitTestFile(t, client, "note.md", "client\n", "client note")
@@ -35,7 +35,7 @@ func TestSyncContinueAfterRebaseConflict(t *testing.T) {
 	if err := app.sync([]string{"--continue"}); err != nil {
 		t.Fatalf("continue rebase: %v\nstderr:\n%s", err, stderr.String())
 	}
-	if strings.Contains(stdout.String(), "Updating selected submodules") {
+	if strings.Contains(stdout.String(), "Synchronizing selected submodules") {
 		t.Fatalf("sync --continue started the normal submodule phase:\n%s", stdout.String())
 	}
 	assertSyncEqual(t, app)
@@ -44,7 +44,7 @@ func TestSyncContinueAfterRebaseConflict(t *testing.T) {
 	}
 }
 
-// covers: AC-7
+// covers: AC-2
 func TestSyncContinueAfterMergeConflict(t *testing.T) {
 	_, client, peer := setupRemoteFixture(t)
 	commitTestFile(t, client, "note.md", "client\n", "client note")
@@ -72,7 +72,7 @@ func TestSyncContinueAfterMergeConflict(t *testing.T) {
 	if err := app.sync([]string{"--continue"}); err != nil {
 		t.Fatalf("continue merge: %v\nstderr:\n%s", err, stderr.String())
 	}
-	if strings.Contains(stdout.String(), "Updating selected submodules") {
+	if strings.Contains(stdout.String(), "Synchronizing selected submodules") {
 		t.Fatalf("sync --continue started the normal submodule phase:\n%s", stdout.String())
 	}
 	assertSyncEqual(t, app)

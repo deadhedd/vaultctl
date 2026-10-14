@@ -2,59 +2,83 @@
 
 ## Context
 
-The vault is a Git superproject (the parent repository that records other repositories) with an existing client sync flow. That flow saves local vault changes with `git add -A`, fetches and reconciles the configured upstream, and pushes when needed. Git records submodule URLs in `.gitmodules` and each selected submodule commit as a gitlink (a commit reference stored in the parent tree). The automatic save must not turn an unstaged submodule checkout change into a new parent gitlink commit.
+The vault already synchronizes a parent Git repository and can initialize selected submodules at the commits recorded by their parents. The parent autosave has a narrow rule for gitlinks (the commit pointers stored for submodules): it preserves staged operator choices and does not turn unstaged child checkout movement into a parent commit.
 
-After a vault sync, a submodule may still be absent or checked out at a commit other than the one recorded by the vault. Operators need the project files present at the exact commits selected by the parent repository. A dirty submodule worktree must keep its local edits safe, and a partial recursive update must remain clear and retryable.
+The extension makes direct project submodules track by default. Each child may have safe local work, an upstream branch, a conflict, or a push failure. A child can finish before a later child fails, so the result needs to remain recoverable across another parent sync. The parent also needs to record child commits without replacing the existing gitlink safeguards.
 
-This feature is separate from external documentation projection. That feature continues to reject submodules inside selected source trees. Server mode continues to reject sync as it does today.
+The external documentation feature reads selected source commit trees and fetches source Git metadata. Its source worktrees and upstreams must remain read only. Server mode does not synchronize and remains outside this feature.
 
 ## Options considered
 
-### Option 1: Use native Git for lifecycle and client sync
+### Option 1: Extend the current client sync and recovery flow
 
-Keep explicit add, update, and removal in the existing Git escape hatch. After a successful normal client sync, run one recursive Git update at the commits recorded by the parent repositories.
-
-**Pros**:
-
-* Reuses Git's submodule format, checkout rules, URL handling, and worktree safety.
-* Keeps the new vaultctl behavior inside the existing client sync path.
-* Requires no application state, rollback protocol, or public command surface.
-
-**Cons**:
-
-* Git's diagnostics and partial progress are visible to operators, and a failed update may follow a successful parent push.
-* Git's native active-submodule selection and partial recursive progress determine which worktrees are updated before an error.
-
-### Option 2: Add dedicated vaultctl lifecycle commands
-
-Add vaultctl commands for add, initialize, update, and remove, with custom validation around Git operations.
+Reuse the existing Git runner and the parent's autosave, fetch, history classification, rebase or merge, push, and conflict recovery functions. Apply them to each direct tracking child, then record all changed child gitlinks together after every selected child succeeds. Store the tracking default and pin opt out in `.gitmodules`. Scoped child continue completes Git's operation but leaves pushing to the next normal sync, which reselects and validates its target. (basis: `internal/vaultctl/sync.go`, spec 0003, `internal/vaultctl/AGENTS.md`)
 
 **Pros**:
 
-* The CLI could give lifecycle actions a consistent help surface and tailored messages.
-* It could enforce additional path and repository rules before invoking Git.
+* Reuses existing safety checks and user recovery patterns.
+* Keeps tracked state in Git's existing parent metadata without a separate vaultctl manifest.
+* Makes child successes durable before moving to the next child, while keeping parent recording atomic across the selected set.
 
 **Cons**:
 
-* It duplicates operations already available through the Git escape hatch.
-* It creates new command behavior and validation rules without a requirement that Git cannot meet.
+* A child can push successfully before the parent records its gitlink.
+* A second parent reconciliation is needed after the grouped link commit.
+* Direct child path recovery adds syntax to the existing sync command.
 
-### Option 3: Keep all submodule updates manual
+### Option 2: Use only native Git remote submodule updates
 
-Document native Git lifecycle operations, but leave submodule initialization to operators after each vault sync.
+Ask Git to update all selected children from remote branches and retain native checkout behavior for pins. (basis: spec 0003, Git's existing submodule interface)
 
 **Pros**:
 
-* Adds no behavior to the existing synchronization flow.
-* Leaves all update timing under direct operator control.
+* Git owns branch lookup and recursive update selection.
+* The vaultctl code adds fewer child history operations.
 
 **Cons**:
 
-* A normal vault sync can finish while project worktrees remain absent or at a different commit.
-* Operators must remember and repeat a second command after synchronization.
+* It does not reuse vaultctl's safe child autosave, history classification, push, and conflict recovery behavior.
+* Native checkout alone does not provide the required grouped parent recording and retry contract.
+
+### Option 3: Add a separate vaultctl submodule manifest and recovery ledger
+
+Store mode, branch, and progress for each child in a new manifest and persist unfinished recovery information outside Git's operation state. (basis: existing external documentation manifest and state model in specs 0001 and 0002)
+
+**Pros**:
+
+* The feature could express per child mode and progress without relying on `.gitmodules`.
+* A ledger could make every partial phase explicit.
+
+**Cons**:
+
+* It duplicates paths and branch data already represented by Git.
+* It adds migrations and another state format to validate and recover.
+* Git already keeps the rebase and merge state needed for targeted child recovery.
 
 ## Rationale
 
-The existing Git escape hatch already exposes the native operations needed to add, initialize, update, and remove submodules. Git's `.gitmodules` file and gitlinks already provide the tracked configuration and exact target commits. Adding a vaultctl model or lifecycle commands would create a second source of truth for behavior that Git owns. The project rule against automatic Git configuration changes also favors preserving local URL overrides. A broken local URL should fail visibly instead of being silently rewritten.
+The current sync code already supplies the decisions that matter for each repository: it checks for unfinished operations and conflicts, saves safe work, fetches, classifies history, rebases by default or merges on request, pushes without force, and exposes manual recovery. Reusing that path for a child keeps the extension close to the accepted Feature 7 behavior and avoids a second reconciliation implementation. (basis: `internal/vaultctl/sync.go`, `internal/vaultctl/app.go`, `internal/vaultctl/AGENTS.md`)
 
-Normal sync must update submodules only after the parent repository reaches its final synchronized commit, including after a required push. Its autosave must preserve index decisions for explicitly staged gitlinks and must not stage an unstaged worktree gitlink change. The explicit checkout mode selects recorded commits even when local update strategies request merge or rebase, while omitting force lets Git protect local work. If Git returns an error after making partial progress, those completed updates remain and vaultctl reports the parent success and incomplete submodule phase so the operator can retry.
+The tracked `.gitmodules` entry is the smallest durable mode source. Tracking is the default as requested. A concrete `branch` value names the intended branch; otherwise Git's remote symbolic `HEAD` supplies the default. The explicit `vaultctl-pinned = true` key is only an opt out. This avoids both guessed branch names and a second manifest. (basis: `docs/scope/scope.md`, spec 0003, `AGENTS.md`)
+
+Pushing each completed child before continuing makes partial progress durable. Waiting until every selected child succeeds before creating the parent link commit keeps the parent's new links together. The retry compares every successful child `HEAD` with the parent index gitlink after initial parent sync, so earlier successful children are still recorded if unchanged during retry. A retry must leave initialized tracking worktrees at their current commit and fetch them again, while the existing autosave continues to protect intentional gitlink changes. (basis: spec 0003, `internal/vaultctl/AGENTS.md`, the project rule to stop on unsafe or incomplete repository states)
+
+Scoped continuation deliberately does not push. Git keeps the operation state needed to complete the conflict, but it does not durably identify the original branch and push destination. A normal sync afterward resolves and fetches the currently selected target before it pushes. This avoids a separate recovery ledger while keeping branch selection and push validation in the normal sync path. (basis: existing parent `sync --continue` recovery shape and the engineer's recovery decision)
+
+Projection remains a separate read only operation. Its fetch and tree read path is not reused for child sync. Canonical source worktree path overlap blocks checkouts and child recovery. A tracking push target that matches a configured projection source remote is rejected before the child autosave or continuation can create a commit, and again before a push. Git URL rewrites are resolved and local endpoints are canonicalized before comparison. (basis: specs 0001 and 0002, the engineer's projection boundary decision)
+
+## References
+
+**Project sources**:
+
+* `AGENTS.md` and `internal/vaultctl/AGENTS.md`, repository safety and sync boundaries
+* `docs/scope/scope.md`, Feature 7 extension intent
+* `docs/specs/0001-external-documentation-refresh.md` and `docs/specs/0002-exclusive-ownership-projected-destinations.md`, projection source behavior
+* `docs/specs/0003-project-repository-submodules/index.md`, existing lifecycle, gitlink, and recovery behavior
+* `internal/vaultctl/sync.go`, existing synchronization and recovery flow
+* `golang-testing` and `golang-safety`, project implementation skills
+
+**Practices & standards**:
+
+* Fail closed when a Git target or repository state cannot be identified reliably.
+* Preserve local work and make partial synchronization retryable.

@@ -115,8 +115,14 @@ func (a *App) sync(args []string) error {
 	}
 	switch args[0] {
 	case "--continue":
+		if len(args) == 3 && args[1] == "--submodule" {
+			return a.continueOrAbortSubmodule(args[2], "continue")
+		}
 		return a.syncContinue()
 	case "--abort":
+		if len(args) == 3 && args[1] == "--submodule" {
+			return a.continueOrAbortSubmodule(args[2], "abort")
+		}
 		return a.syncAbort()
 	case "--merge":
 		return a.syncStart(true)
@@ -242,42 +248,42 @@ func (a *App) syncStart(useMerge bool) error {
 		return err
 	}
 
-	state, err := a.currentSyncState()
+	if err := a.reconcileHistory(upstream.name, upstream, useMerge, "upstream"); err != nil {
+		return err
+	}
+	return a.finishNormalSync(useMerge)
+}
+
+func (a *App) reconcileHistory(target string, pushTarget upstreamInfo, useMerge bool, description string) error {
+	state, err := a.currentSyncStateAgainst(target)
 	if err != nil {
 		return err
 	}
-	a.say("Local and upstream histories are %s.", state)
+	a.say("Local and %s histories are %s.", description, state)
 	switch state {
 	case syncEqual:
-		a.say("The parent vault history is already synchronized.")
-		return a.finishNormalSync()
+		if description == "upstream" {
+			a.say("The parent vault history is already synchronized.")
+		}
+		return nil
 	case syncBehind:
-		a.say("Fast-forwarding to %s...", upstream.name)
-		if err := a.checkedStream("fast-forward", "merge", "--ff-only", upstream.name); err != nil {
-			return err
-		}
-		return a.finishNormalSync()
+		a.say("Fast-forwarding to %s...", description)
+		return a.checkedStream("fast-forward", "merge", "--ff-only", target)
 	case syncAhead:
-		if err := a.push(upstream); err != nil {
-			return err
-		}
-		return a.finishNormalSync()
+		return a.push(pushTarget)
 	case syncDiverged:
 		if useMerge {
-			a.say("Histories diverged; merging %s...", upstream.name)
-			if err := a.runSyncCommand("merge upstream", "merge", upstream.name); err != nil {
+			a.say("Histories diverged; merging %s...", description)
+			if err := a.runSyncCommand("merge "+description, "merge", target); err != nil {
 				return err
 			}
 		} else {
-			a.say("Histories diverged; rebasing local commits onto %s...", upstream.name)
-			if err := a.runSyncCommand("rebase onto upstream", "rebase", upstream.name); err != nil {
+			a.say("Histories diverged; rebasing local commits onto %s...", description)
+			if err := a.runSyncCommand("rebase onto "+description, "rebase", target); err != nil {
 				return err
 			}
 		}
-		if err := a.push(upstream); err != nil {
-			return err
-		}
-		return a.finishNormalSync()
+		return a.push(pushTarget)
 	default:
 		return fmt.Errorf("internal error: unknown synchronization state")
 	}
@@ -474,17 +480,11 @@ func sortedGitlinkPaths(paths map[string]struct{}) []string {
 	return result
 }
 
-func (a *App) finishNormalSync() error {
+func (a *App) finishNormalSync(useMerge bool) error {
 	a.say("Parent vault synchronization succeeded.")
-	a.say("Updating selected submodules at their recorded commits...")
-	code, err := a.git.stream("submodule", "update", "--init", "--recursive", "--checkout")
-	if err != nil {
-		fmt.Fprintln(a.stderr, "[vaultctl] Parent synchronization succeeded, but submodule state may be incomplete.")
+	if err := a.syncSelectedSubmodules(useMerge); err != nil {
+		fmt.Fprintln(a.stderr, "[vaultctl] Parent synchronization succeeded, but child synchronization or parent link recording is incomplete.")
 		return err
-	}
-	if code != 0 {
-		fmt.Fprintln(a.stderr, "[vaultctl] Parent synchronization succeeded, but submodule state may be incomplete.")
-		return fmt.Errorf("submodule update failed (Git exited with status %d)", code)
 	}
 	a.say("Submodule initialization and update succeeded.")
 	a.say("Synchronization completed successfully.")
@@ -492,7 +492,11 @@ func (a *App) finishNormalSync() error {
 }
 
 func (a *App) currentSyncState() (syncState, error) {
-	counts, err := a.captureChecked("compare local and upstream histories", "rev-list", "--left-right", "--count", "HEAD...@{u}")
+	return a.currentSyncStateAgainst("@{u}")
+}
+
+func (a *App) currentSyncStateAgainst(target string) (syncState, error) {
+	counts, err := a.captureChecked("compare local and upstream histories", "rev-list", "--left-right", "--count", "HEAD..."+target)
 	if err != nil {
 		return 0, err
 	}
@@ -500,6 +504,11 @@ func (a *App) currentSyncState() (syncState, error) {
 }
 
 func (a *App) push(upstream upstreamInfo) error {
+	if a.pushGuard != nil {
+		if err := a.pushGuard(); err != nil {
+			return err
+		}
+	}
 	a.say("Pushing %s to %s...", upstream.branch, upstream.name)
 	refspec := "HEAD:" + upstream.mergeRef
 	if err := a.checkedStream("push to upstream", "push", "--", upstream.remote, refspec); err != nil {
@@ -580,8 +589,18 @@ func (a *App) reportConflicts(files []string) {
 	}
 	fmt.Fprintln(a.stderr, "[vaultctl] Next commands:")
 	fmt.Fprintln(a.stderr, "  vaultctl status")
+	if a.submoduleRecoveryPath != "" {
+		path := shellQuote(a.submoduleRecoveryPath)
+		fmt.Fprintf(a.stderr, "  vaultctl sync --continue --submodule %s\n", path)
+		fmt.Fprintf(a.stderr, "  vaultctl sync --abort --submodule %s\n", path)
+		return
+	}
 	fmt.Fprintln(a.stderr, "  vaultctl sync --continue")
 	fmt.Fprintln(a.stderr, "  vaultctl sync --abort")
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func (a *App) runSyncCommand(action string, args ...string) error {
