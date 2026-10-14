@@ -19,12 +19,15 @@ type userError struct {
 func (e *userError) Error() string { return e.message }
 
 type App struct {
-	cfg      Config
-	git      *gitRunner
-	stdout   io.Writer
-	stderr   io.Writer
-	now      func() time.Time
-	hostname func() (string, error)
+	cfg                   Config
+	git                   *gitRunner
+	stdout                io.Writer
+	stderr                io.Writer
+	now                   func() time.Time
+	hostname              func() (string, error)
+	repoLabel             string
+	submoduleRecoveryPath string
+	pushGuard             func() error
 }
 
 func newApp(cfg Config, stdin io.Reader, stdout, stderr io.Writer) *App {
@@ -146,10 +149,14 @@ func (a *App) stageAndCommit(message string, announceNothing bool) error {
 }
 
 func (a *App) stageAndCommitExcluding(message string, announceNothing bool, excludedGitlinks map[string]struct{}) error {
+	repository := a.repoLabel
+	if repository == "" {
+		repository = "vault"
+	}
 	if len(excludedGitlinks) > 0 {
-		a.say("Staging vault changes while preserving submodule gitlinks...")
+		a.say("Staging %s changes while preserving submodule gitlinks...", repository)
 	} else {
-		a.say("Staging all vault changes...")
+		a.say("Staging all %s changes...", repository)
 	}
 	args := []string{"add", "-A"}
 	if len(excludedGitlinks) > 0 {
@@ -178,11 +185,11 @@ func (a *App) stageAndCommitExcluding(message string, announceNothing bool, excl
 		return fmt.Errorf("inspect staged changes failed (Git exited with status %d): %s", result.exitCode, strings.TrimSpace(result.stderr))
 	}
 
-	a.say("Creating vault commit...")
-	if err := a.checkedStream("commit vault changes", "commit", "-m", message); err != nil {
+	a.say("Creating %s commit...", repository)
+	if err := a.checkedStream("commit "+repository+" changes", "commit", "-m", message); err != nil {
 		return err
 	}
-	a.say("Vault changes saved.")
+	a.say("%s changes saved.", strings.ToUpper(repository[:1])+repository[1:])
 	return nil
 }
 

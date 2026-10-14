@@ -91,9 +91,9 @@ Treat every configured projection destination as owned by vaultctl. Refresh must
 
 ### 7. Project repository submodules · done
 
-Let vault maintainers manage project repositories inside the vault as Git submodules, keeping each project repository distinct from the vault repository.
+Let vault maintainers manage project repositories inside the vault as Git submodules, keeping each project repository distinct from the vault repository. Tracking is the default and synchronizes with each configured upstream branch. Pinned submodules keep standard Git recorded revision behavior.
 
-**Done when:** Vault maintainers can add, initialize, update, and remove project repositories as Git submodules at explicit vault paths, while failed operations preserve unrelated vault work and report incomplete submodule state.
+**Done when:** Normal client sync commits safe local work in tracking submodules, reconciles with their configured upstream branches, pushes local commits, and records changed submodule commits in the parent vault. Pinned submodules keep standard recorded revision behavior. Conflicts preserve local work and have clear recovery. Documentation projections remain strictly read only with respect to their source repositories.
 Code in `internal/vaultctl/app.go` and `internal/vaultctl/sync.go`.
 - [x] Design it (spec): `/architect project repository submodules` ([0003](../specs/0003-project-repository-submodules/index.md))
 - [x] Build it: `/develop project repository submodules`
@@ -104,6 +104,7 @@ Code in `internal/vaultctl/app.go` and `internal/vaultctl/sync.go`.
 - [x] Test it: `go test -race -shuffle=on ./...` passed, including the named autosave cases and the later-sync regression.
 - [x] Review it (fresh model): `/check review project repository submodules`
 - [x] Document it: `/document project repository submodules`
+- [x] Extend the design (spec): `/architect project repository submodules`
 
 ## Deferred
 

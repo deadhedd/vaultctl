@@ -43,6 +43,23 @@ func installGitManagedStateMutation(t testing.TB, vaultRoot, mutationPath, mutat
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+func installGitParentFollowupAdvance(t testing.TB, vaultRoot, parentRemote, target string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	buildGitMutationWrapper(t, binDir)
+	t.Setenv("VAULTCTL_GIT_WRAPPER_MODE", "parent-followup-advance")
+	t.Setenv("VAULTCTL_REAL_GIT", realGit)
+	t.Setenv("VAULTCTL_VAULT_ROOT", vaultRoot)
+	t.Setenv("VAULTCTL_PARENT_REMOTE", parentRemote)
+	t.Setenv("VAULTCTL_PARENT_ADVANCE", target)
+	t.Setenv("VAULTCTL_PARENT_FETCH_COUNT", filepath.Join(binDir, "parent-fetch.count"))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func buildGitMutationWrapper(t testing.TB, binDir string) {
 	t.Helper()
 	_, currentFile, _, ok := runtime.Caller(0)
