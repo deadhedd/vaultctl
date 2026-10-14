@@ -605,8 +605,17 @@ func TestSyncInitializesMissingActiveTrackingSubmodule(t *testing.T) {
 	runGit(t, client, "clone", parentRemote, fresh)
 	runGit(t, fresh, "config", "submodule.active", "Projects/child")
 	childPath := filepath.Join(fresh, "Projects", "child")
-	if got := strings.TrimSpace(runGit(t, childPath, "rev-parse", "--show-toplevel")); got != fresh {
-		t.Fatalf("fresh clone child resolves to %q before sync, want parent worktree %q", got, fresh)
+	gotRoot := strings.TrimSpace(runGit(t, childPath, "rev-parse", "--show-toplevel"))
+	gotRootInfo, err := os.Stat(gotRoot)
+	if err != nil {
+		t.Fatalf("stat fresh clone child root %q: %v", gotRoot, err)
+	}
+	wantRootInfo, err := os.Stat(fresh)
+	if err != nil {
+		t.Fatalf("stat fresh clone parent worktree %q: %v", fresh, err)
+	}
+	if !os.SameFile(gotRootInfo, wantRootInfo) {
+		t.Fatalf("fresh clone child resolves to %q, want parent worktree %q", gotRoot, fresh)
 	}
 	app, stdout, stderr := testApp(Config{Mode: ModeClient, VaultPath: fresh})
 	if err := app.sync(nil); err != nil {
@@ -1064,11 +1073,19 @@ func TestRecursiveCheckoutRejectsNestedProjectionSourceSymlink(t *testing.T) {
 	}
 
 	app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client})
-	protection := projectionProtection{worktrees: []string{sourceWorktree}}
-	if err := app.checkSubmodulePath(client, "Projects/child/nested", protection); err == nil || !strings.Contains(err.Error(), "overlaps external documentation source") {
+	vaultRoot, err := canonicalDirectory(client)
+	if err != nil {
+		t.Fatalf("resolve vault root: %v", err)
+	}
+	canonicalSource, err := canonicalDirectory(sourceWorktree)
+	if err != nil {
+		t.Fatalf("resolve projection source worktree: %v", err)
+	}
+	protection := projectionProtection{worktrees: []string{canonicalSource}}
+	if err := app.checkSubmodulePath(vaultRoot, "Projects/child/nested", protection); err == nil || !strings.Contains(err.Error(), "overlaps external documentation source") {
 		t.Fatalf("checkSubmodulePath error = %v, want nested source overlap refusal", err)
 	}
-	err := app.validateRecursiveCheckoutPaths([]submoduleEntry{{name: "Projects/child", path: "Projects/child"}}, protection)
+	err = app.validateRecursiveCheckoutPaths([]submoduleEntry{{name: "Projects/child", path: "Projects/child"}}, protection)
 	if err == nil || !strings.Contains(err.Error(), "escapes the configured vault worktree") {
 		t.Fatalf("validateRecursiveCheckoutPaths error = %v, want nested worktree containment refusal", err)
 	}
