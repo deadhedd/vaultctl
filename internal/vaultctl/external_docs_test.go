@@ -139,6 +139,101 @@ func TestRefreshExternalDocsSerializesCompleteOwnershipInventory(t *testing.T) {
 	}
 }
 
+func TestRefreshExternalDocsNestedSourceDirectoryMapping(t *testing.T) {
+	tests := []struct {
+		name             string
+		exerciseRollback bool
+	}{
+		{name: "stages exact projected files"},
+		{name: "restores exact projection after commit failure", exerciseRollback: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, client, _ := setupRemoteFixture(t)
+			sourceRoot, sourceRepo, _ := setupExternalSource(t)
+			if err := os.MkdirAll(filepath.Join(sourceRepo, "docs", "scope", "nested"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(sourceRepo, "docs", "scope", "guide.md"), "Guide one\n")
+			writeTestFile(t, filepath.Join(sourceRepo, "docs", "scope", "nested", "reference.md"), "Reference one\n")
+			runGit(t, sourceRepo, "add", "docs/scope")
+			runGit(t, sourceRepo, "commit", "-m", "add nested documentation mapping")
+			runGit(t, sourceRepo, "push", "origin", "main")
+
+			destination := "50 - Repos/ephemctl/docs/scope"
+			writeExternalManifest(t, client, `[{"source":"docs/scope","destination":"`+destination+`"}]`)
+			app, _, _ := testApp(Config{Mode: ModeClient, VaultPath: client, SourceRoot: sourceRoot})
+			if err := app.refreshExternalDocs(); err != nil {
+				t.Fatalf("refreshExternalDocs: %v", err)
+			}
+
+			wantCommitPaths := ".vaultctl/external-docs-state.json\n" + destination + "/guide.md\n" + destination + "/nested/reference.md"
+			if got := strings.TrimSpace(runGit(t, client, "show", "--format=", "--name-only", "HEAD")); got != wantCommitPaths {
+				t.Fatalf("refresh commit paths = %q, want exact projected files %q", got, wantCommitPaths)
+			}
+			statePath := filepath.Join(client, filepath.FromSlash(externalStatePath))
+			beforeState, err := os.ReadFile(statePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(beforeState), destination+"/docs") {
+				t.Fatalf("generated ownership state includes an ancestor path: %s", beforeState)
+			}
+			if !tt.exerciseRollback {
+				return
+			}
+
+			guidePath := filepath.Join(client, filepath.FromSlash(destination), "guide.md")
+			referencePath := filepath.Join(client, filepath.FromSlash(destination), "nested", "reference.md")
+			if err := os.Remove(filepath.Join(sourceRepo, "docs", "scope", "nested", "reference.md")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(sourceRepo, "docs", "scope", "nested")); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(sourceRepo, "docs", "scope", "guide.md"), "Guide two\n")
+			runGit(t, sourceRepo, "add", "docs/scope")
+			runGit(t, sourceRepo, "commit", "-m", "remove nested projected directory")
+			runGit(t, sourceRepo, "push", "origin", "main")
+
+			writeTestFile(t, filepath.Join(client, "unrelated-staged.md"), "keep staged\n")
+			runGit(t, client, "add", "unrelated-staged.md")
+			writeTestFile(t, filepath.Join(client, "unrelated-unstaged.md"), "keep unstaged\n")
+			beforeCached := runGit(t, client, "diff", "--cached", "--name-status")
+			beforeStatus := runGit(t, client, "status", "--porcelain")
+			beforeHead := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD"))
+			hook := filepath.Join(client, ".git", "hooks", "pre-commit")
+			writeTestFile(t, hook, "#!/bin/sh\nprintf '%s\\n' 'nested mapping commit failure' >&2\nexit 42\n")
+			if err := os.Chmod(hook, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			err = app.refreshExternalDocs()
+			if err == nil || !strings.Contains(err.Error(), "nested mapping commit failure") {
+				t.Fatalf("refresh error = %v, want injected commit failure", err)
+			}
+			if got := strings.TrimSpace(runGit(t, client, "rev-parse", "HEAD")); got != beforeHead {
+				t.Fatalf("HEAD after rollback = %q, want %q", got, beforeHead)
+			}
+			if content, err := os.ReadFile(guidePath); err != nil || string(content) != "Guide one\n" {
+				t.Fatalf("guide after rollback = %q, err = %v", content, err)
+			}
+			if content, err := os.ReadFile(referencePath); err != nil || string(content) != "Reference one\n" {
+				t.Fatalf("nested reference after rollback = %q, err = %v", content, err)
+			}
+			if got, err := os.ReadFile(statePath); err != nil || string(got) != string(beforeState) {
+				t.Fatalf("generated state after rollback = %q, err = %v, want prior state", got, err)
+			}
+			if got := runGit(t, client, "diff", "--cached", "--name-status"); got != beforeCached {
+				t.Fatalf("cached paths after rollback = %q, want %q", got, beforeCached)
+			}
+			if got := runGit(t, client, "status", "--porcelain"); got != beforeStatus {
+				t.Fatalf("status after rollback = %q, want %q", got, beforeStatus)
+			}
+		})
+	}
+}
+
 // AC-1: without a manifest, refresh preserves the existing client path and
 // does not require the optional source_root configuration.
 func TestRefreshExternalDocsWithoutManifestDoesNotRequireSourceRoot(t *testing.T) {

@@ -1943,9 +1943,12 @@ func buildExternalProjection(repository string, source externalSource, commit st
 			return externalProjection{}, fmt.Errorf("mapping %q: %w", mapping.Source, err)
 		}
 		projection := externalProjectionMapping{Source: mapping.Source, Destination: mapping.Destination, Files: make(map[string][]byte), OwnedPaths: []string{mapping.Destination}}
-		for index, entry := range entries {
+		for _, entry := range entries {
+			if entry.Path != mapping.Source && !strings.HasPrefix(entry.Path, mapping.Source+"/") {
+				continue
+			}
 			if entry.Type == "tree" {
-				if index == 0 {
+				if entry.Path == mapping.Source {
 					projection.Directory = true
 				}
 				path := mapping.Destination
