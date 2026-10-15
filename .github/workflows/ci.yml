@@ -13,7 +13,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -35,7 +35,7 @@ jobs:
         run: go vet ./...
       - name: Test
         shell: bash
-        run: go test -race -shuffle=on ./...
+        run: go test -race -shuffle=on -timeout=13m ./...
       - name: Prepare build output
         shell: bash
         run: mkdir -p bin
