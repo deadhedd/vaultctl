@@ -18,6 +18,7 @@ _These are recommendations to keep the build orderly, not requirements. You can 
 | 5 | Exclusive ownership for projected destinations | Slice 1 | done |
 | 6 | Repository tooling maturity | Foundation | done |
 | 7 | Project repository submodules | Slice 2 | done |
+| 8 | Quick and full sync modes | Slice 3 | planned |
 
 ## Foundations
 
@@ -105,6 +106,19 @@ Code in `internal/vaultctl/app.go` and `internal/vaultctl/sync.go`.
 - [x] Review it (fresh model): `/check review project repository submodules`
 - [x] Document it: `/document project repository submodules`
 - [x] Extend the design (spec): `/architect project repository submodules`
+
+## Slice 3: Synchronization modes
+
+### 8. Quick and full sync modes · planned
+
+Keep everyday vault note synchronization fast as the number of external documentation sources and Git submodules grows. A no-change sync currently refreshes four external sources and fetches four tracking submodules in addition to synchronizing the parent vault.
+
+- `vaultctl sync` and `vaultctl sync --quick`: synchronize the parent vault without refreshing external documentation sources or performing submodule fetch, branch reconciliation, initialization, or recursive checkout. Leave existing projections and submodule worktrees untouched.
+- `vaultctl sync --full`: retain the current comprehensive workflow, including external documentation refresh and submodule synchronization.
+- Make `--quick` and `--full` mutually exclusive. Report which mode ran, so quick success is not mistaken for complete submodule synchronization.
+- Preserve Git safety rules, particularly explicitly staged gitlink changes; do not accidentally stage or rewrite submodule pointers during a quick sync.
+
+**Design later:** Specify behavior when the parent vault advances to new recorded gitlinks without updating local submodule checkouts, and decide whether/how scheduled synchronization should periodically run `--full`. Avoid adding caching, new persistent state, or automatic change detection unless proven necessary.
 
 ## Deferred
 
